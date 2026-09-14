@@ -2,6 +2,14 @@
 
 Freetify is a free, local-first desktop CS2 demo analysis app. It reads `.dem` files on your own computer and provides a lightweight Leetify-style dashboard. No account or cloud upload is required.
 
+## Why Freetify?
+
+I made Freetify because I think charging for data that is free to parse from your own CS2 demos is silly. There is no reason your match data should require a paid service. Freetify is open source, processes demos locally, stores no data remotely, and is completely yours to use.
+
+There are no opaque HLTV- or Leetify-style ratings here. Every metric is named for what it measures, and Freetify explains the formula behind derived values so you can see what they mean and what they do.
+
+Freetify is still improving. Feedback, ideas, and contributions are welcome.
+
 ## Windows installation
 
 The intended user experience is a normal Windows desktop app: download `FreetifySetup.exe`, run it, and click **Install**. It creates a desktop shortcut and bundles the runtime, so users do not need Python, PowerShell, a ZIP extraction step, a terminal, or a separate browser. Freetify opens in its own application window.
