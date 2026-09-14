@@ -31,6 +31,7 @@ DEMO_ROOT = DATA_ROOT / "demos"
 DEMO_ROOT.mkdir(parents=True, exist_ok=True)
 STEAM_SESSION = None
 STEAM_CONFIG = {}
+STEAM_ERROR = None
 STEAM_CALLBACK = ""
 
 
@@ -221,7 +222,7 @@ class Handler(SimpleHTTPRequestHandler):
         super().__init__(*args, directory=str(APP_ROOT), **kwargs)
 
     def do_GET(self):
-        global STEAM_SESSION
+        global STEAM_SESSION, STEAM_ERROR
         if self.path == "/auth/steam":
             realm = STEAM_CALLBACK.rsplit("/auth/", 1)[0] + "/"
             query = urllib.parse.urlencode({"openid.ns": "http://specs.openid.net/auth/2.0", "openid.mode": "checkid_setup", "openid.return_to": STEAM_CALLBACK, "openid.realm": realm, "openid.identity": "http://specs.openid.net/auth/2.0/identifier", "openid.claimed_id": "http://specs.openid.net/auth/2.0/identifier"})
@@ -238,11 +239,14 @@ class Handler(SimpleHTTPRequestHandler):
                         verified = b"is_valid:true" in response.read().replace(b" ", b"")
                     if verified:
                         STEAM_SESSION = {"steamid": claimed.rsplit("/", 1)[-1]}
-                except Exception:
-                    pass
+                        STEAM_ERROR = None
+                except Exception as exc:
+                    STEAM_ERROR = f"Steam verification failed: {exc}"
+            else:
+                STEAM_ERROR = "Steam returned an invalid sign-in response."
             self.send_response(302); self.send_header("Location", "/?steam=connected" if STEAM_SESSION else "/?steam=error"); self.end_headers(); return
         if self.path == "/api/steam":
-            self.end_json(200, {"connected": STEAM_SESSION is not None, "sync_ready": bool(STEAM_CONFIG), **(STEAM_SESSION or {})}); return
+            self.end_json(200, {"connected": STEAM_SESSION is not None, "sync_ready": bool(STEAM_CONFIG), "error": STEAM_ERROR, **(STEAM_SESSION or {})}); return
         if self.path == "/api/steam/sync":
             if not STEAM_SESSION or not STEAM_CONFIG:
                 self.end_json(400, {"error": "Connect Steam and provide a Game Authentication Code plus recent match-sharing code first."}); return
