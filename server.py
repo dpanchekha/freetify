@@ -819,7 +819,10 @@ class Handler(SimpleHTTPRequestHandler):
                     result["stored_file"] = destination.name
                     result["demo_hash"] = demo_digest(destination)
                     store_analysis(result)
-                    results.append(result)
+                    # The complete report is already durably stored above.  Keep
+                    # the scan response small so a history of demos does not
+                    # transfer every movement sample to the browser at once.
+                    results.append(analysis_summary(result))
                 except Exception as exc:
                     results.append({"file": source.name, "error": str(exc)})
             self.end_json(200, {"results": results, "folders": [str(folder) for folder in folders]})
@@ -959,7 +962,7 @@ class Handler(SimpleHTTPRequestHandler):
                     if entry.get(field):
                         result[field] = entry[field]
                 store_analysis(result)
-                self.end_json(200, {"ok": True, "result": result}); return
+                self.end_json(200, {"ok": True, "result": analysis_summary(result)}); return
             except (ValueError, TypeError, OSError) as exc:
                 self.end_json(400, {"error": f"Could not reanalyze the local demo: {exc}"}); return
             except Exception as exc:
@@ -1080,7 +1083,9 @@ class Handler(SimpleHTTPRequestHandler):
                 result["stored_file"] = destination.name
                 result["demo_hash"] = demo_digest(destination)
                 store_analysis(result)
-                results.append(result)
+                # Full event/position data lives in REPORT_ROOT and is fetched
+                # only when this match's detail page is opened.
+                results.append(analysis_summary(result))
             except Exception as exc:
                 results.append({"file": safe_name, "error": str(exc)})
         self.end_json(200, {"results": results})
