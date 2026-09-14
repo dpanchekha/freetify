@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Roundhouse — free CS2 match insights</title>
+  <meta name="description" content="A private, free CS2 demo dashboard that runs in your browser.">
+  <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css"><link rel="manifest" href="manifest.webmanifest">
+</head>
+<body>
+<div class="app-shell">
+  <aside class="sidebar">
+    <a class="brand" href="#dashboard" data-view="dashboard"><span class="brand-mark">+</span><span>roundhouse</span></a>
+    <div class="workspace-label">YOUR WORKSPACE</div>
+    <nav><a class="nav-link active" href="#dashboard" data-view="dashboard"><span class="nav-icon">◈</span>Overview</a><a class="nav-link" href="#matches" data-view="matches"><span class="nav-icon">▤</span>Matches <span class="count">8</span></a><a class="nav-link" href="#settings" data-view="settings"><span class="nav-icon">⚙</span>Settings</a></nav>
+    <div class="sidebar-bottom"><div class="privacy-dot"></div><span>Local-only mode</span><button class="help-button">?</button></div>
+  </aside>
+  <main class="main-content">
+    <header class="topbar"><div><div class="eyebrow" id="page-kicker">PERSONAL ANALYTICS</div><h1 id="page-title">Overview</h1></div><div class="profile"><div class="avatar">DP</div><span>Demo player</span><span class="chevron">⌄</span></div></header>
+    <section class="view active-view" id="dashboard-view">
+      <div class="welcome-row"><div><h2>Good evening, player.</h2><p class="muted">Here’s how your last sessions have been going.</p></div><button class="button primary" id="scan-button">↻ Scan for new demos</button></div>
+      <div class="stat-grid"><article class="stat-card"><div class="stat-label">Rating <span class="info">i</span></div><div class="stat-value">1.12</div><div class="trend up">↑ 8.4% <span>vs last 10</span></div><div class="sparkline"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></article><article class="stat-card"><div class="stat-label">Win rate <span class="info">i</span></div><div class="stat-value">58.3<span class="unit">%</span></div><div class="trend up">↑ 4.1% <span>vs last 10</span></div><div class="sparkline green"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></article><article class="stat-card"><div class="stat-label">K / D <span class="info">i</span></div><div class="stat-value">1.24</div><div class="trend down">↓ 2.0% <span>vs last 10</span></div><div class="sparkline orange"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></article></div>
+      <div class="section-heading"><h3>Recent matches</h3><a href="#matches" data-view="matches">View all <span>→</span></a></div><div class="table-card"><div class="match-row table-head"><span>MAP</span><span>RESULT</span><span>RATING</span><span>K / D</span><span>DATE</span><span></span></div><div id="recent-matches"></div></div>
+      <div class="tip-card"><div class="tip-icon">✦</div><div><strong>Small adjustment, big impact</strong><p>You’re strongest in opening duels on T-side. Try taking first contact more often on Mirage.</p></div><span class="tip-arrow">→</span></div>
+    </section>
+    <section class="view" id="matches-view"><div class="page-intro"><div><h2>All matches</h2><p class="muted">Your locally scanned demo history.</p></div><button class="button secondary" id="matches-scan">↻ Scan folder</button></div><div class="table-card"><div class="match-row table-head"><span>MAP</span><span>RESULT</span><span>RATING</span><span>K / D</span><span>DATE</span><span></span></div><div id="all-matches"></div></div></section>
+    <section class="view" id="settings-view"><div class="page-intro"><div><h2>Settings</h2><p class="muted">Keep your demos private and your setup simple.</p></div><div class="saved-note" id="saved-note">All changes save automatically</div></div><div class="settings-card"><div class="setting-title"><div class="setting-symbol">⌁</div><div><h3>Demo folder</h3><p>Roundhouse looks here when you scan for new CS2 demos.</p></div></div><div class="folder-picker"><div class="folder-path" id="folder-path">C:\Users\You\AppData\Local\Steam\steamapps\common\Counter-Strike Global Offensive\csgo\replays</div><button class="button primary" id="choose-folder">Choose folder</button><input type="file" id="folder-input" webkitdirectory directory multiple hidden></div><div class="default-path"><span class="check">✓</span><span><strong>Suggested Windows default</strong><br><small>That’s the standard Steam location. Choose a folder above if your Steam library is somewhere else.</small></span></div></div><div class="settings-card compact"><div class="setting-title"><div class="setting-symbol">◌</div><div><h3>Privacy</h3><p>Your demos are processed in this browser. Nothing is uploaded.</p></div><span class="toggle on"><i></i></span></div></div><div class="install-card"><span class="install-icon">↓</span><div><strong>Want a desktop shortcut?</strong><p>Install Roundhouse as a lightweight app from your browser’s address bar.</p></div><span class="install-arrow">↗</span></div></section>
+  </main>
+</div><div class="toast" id="toast">Scanning for demos…</div><script src="app.js"></script>
+</body></html>
