@@ -37,6 +37,7 @@ jobs:
         run: >-
           python -m PyInstaller --noconfirm --clean --onedir --name Freetify
           --windowed
+          --icon assets/freetify.ico
           --collect-all demoparser2 --collect-all webview
           --add-data "index.html${{ runner.os == 'Windows' && ';' || ':' }}."
           --add-data "app.js${{ runner.os == 'Windows' && ';' || ':' }}."

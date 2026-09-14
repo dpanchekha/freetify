@@ -16,6 +16,7 @@ SolidCompression=yes
 PrivilegesRequired=lowest
 WizardStyle=modern
 UninstallDisplayIcon={app}\{#AppExeName}
+SetupIconFile=assets\freetify.ico
 
 [Files]
 Source: "dist\Freetify\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs

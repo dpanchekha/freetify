@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import uuid
 import urllib.parse
 import urllib.request
 import urllib.error
@@ -35,12 +36,16 @@ DEMO_ROOT = DATA_ROOT / "demos"
 DEMO_ROOT.mkdir(parents=True, exist_ok=True)
 STATE_FILE = DATA_ROOT / "state.json"
 LIBRARY_FILE = DATA_ROOT / "library.json"
+REPORT_ROOT = DATA_ROOT / "reports"
+REPORT_ROOT.mkdir(parents=True, exist_ok=True)
 LIBRARY_LOCK = threading.Lock()
 STEAM_SESSION = None
 STEAM_CONFIG = {}
 STEAM_GC_REFRESH_TOKEN = None
 STEAM_ERROR = None
 STEAM_CALLBACK = ""
+DOWNLOAD_JOBS = {}
+DOWNLOAD_JOBS_LOCK = threading.Lock()
 
 
 def load_state():
@@ -81,7 +86,7 @@ def load_library():
         library = json.loads(LIBRARY_FILE.read_text(encoding="utf-8"))
         if not isinstance(library, list):
             return []
-        unique, seen = [], set()
+        unique, seen, migrated = [], set(), False
         for item in library:
             if not isinstance(item, dict):
                 continue
@@ -90,7 +95,23 @@ def load_library():
                 continue
             if key:
                 seen.add(key)
-            unique.append(item)
+            if item.get("report_file"):
+                unique.append(item)
+            else:
+                report_file = hashlib.sha256(key.encode()).hexdigest() + ".json"
+                try:
+                    (REPORT_ROOT / report_file).write_text(json.dumps(item), encoding="utf-8")
+                    migrated = True
+                except OSError:
+                    pass
+                summary = analysis_summary(item)
+                summary["report_file"] = report_file
+                unique.append(summary)
+        if migrated:
+            try:
+                LIBRARY_FILE.write_text(json.dumps(unique[:100]), encoding="utf-8")
+            except OSError:
+                pass
         return sorted(unique, key=lambda item: str(item.get("saved_at") or ""), reverse=True)
     except (OSError, ValueError, TypeError):
         return []
@@ -105,8 +126,12 @@ def store_analysis(result):
     if not key:
         return
     with LIBRARY_LOCK:
+        report_file = hashlib.sha256(key.encode()).hexdigest() + ".json"
+        (REPORT_ROOT / report_file).write_text(json.dumps(stored), encoding="utf-8")
         library = [item for item in load_library() if analysis_key(item) != key]
-        library.insert(0, stored)
+        summary = analysis_summary(stored)
+        summary["report_file"] = report_file
+        library.insert(0, summary)
         temporary = LIBRARY_FILE.with_suffix(".tmp")
         try:
             temporary.write_text(json.dumps(library[:100]), encoding="utf-8")
@@ -143,6 +168,16 @@ def demo_digest(path):
         for chunk in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def analysis_summary(result):
+    """Small download response; the full report remains in the local library."""
+    fields = ("file", "stored_file", "match_id", "demo_hash", "saved_at", "primary_player", "primary_team", "header", "round_wins", "round_losses", "match_result", "players", "rounds", "report_file", "value")
+    summary = {field: result.get(field) for field in fields if field in result}
+    summary["summary_only"] = True
+    return clean(summary)
+
+
 STEAM_SESSION, STEAM_CONFIG, STEAM_GC_REFRESH_TOKEN = load_state()
 
 
@@ -395,6 +430,9 @@ def analyze(path, filename, preferred_steamid=None):
     blinds = safe_event(parser, "player_blind")
     shots = safe_event(parser, "weapon_fire")
     rounds = safe_event(parser, "round_end")
+    round_starts = safe_event(parser, "round_start")
+    bomb_plants = safe_event(parser, "bomb_planted")
+    bomb_defuses = safe_event(parser, "bomb_defused")
     players = records(parser.parse_player_info())
     snapshots = []
     round_ticks = event_ticks(rounds)
@@ -414,11 +452,11 @@ def analyze(path, filename, preferred_steamid=None):
         try:
             # A demo used to be reduced to roughly 240 snapshots.  That was
             # enough for a static heatmap but made the playback appear to jump
-            # between locations. Keep up to ~6,000 real game snapshots (and
-            # never skip more than four ticks on shorter demos).
-            sample_step = max(4, max_tick // 6000)
+            # between locations. Keep up to ~30,000 real game snapshots; this
+            # gives long 64-tick matches roughly 20 position updates/sec.
+            sample_step = max(2, max_tick // 30000)
             sample_ticks = list(range(0, max_tick + 1, sample_step))
-            positions = records(parser.parse_ticks(["X", "Y", "player_name", "team_num", "game_time"], ticks=sample_ticks))
+            positions = records(parser.parse_ticks(["X", "Y", "yaw", "health", "armor_value", "helmet", "has_defuser", "has_bomb", "active_weapon_name", "player_name", "team_num", "game_time"], ticks=sample_ticks))
         except Exception:
             positions = []
     by_player = {}
@@ -475,6 +513,51 @@ def analyze(path, filename, preferred_steamid=None):
             if snapshot.get(source) is not None:
                 item[target] = max(item.get(target, 0), int(snapshot[source] or 0))
     snapshot_teams = {(snapshot.get("player_name") or snapshot.get("name")): snapshot.get("team_num") for snapshot in snapshots if snapshot.get("player_name") or snapshot.get("name")}
+    start_ticks = event_ticks(round_starts)
+    for player in by_player.values():
+        player.update({"opening_kills": 0, "opening_deaths": 0, "trade_kills": 0, "trade_deaths": 0, "clutches": 0, "rounds_played": 0, "objective_events": 0})
+    def round_number(tick):
+        return sum(1 for start in start_ticks if start <= tick) if start_ticks else 1
+    opening_rounds = set()
+    for death in sorted(deaths, key=lambda event: int(event.get("tick") or 0)):
+        try:
+            death_tick = int(death.get("tick") or 0)
+        except (TypeError, ValueError):
+            continue
+        attacker = death.get("attacker_name") or death.get("attacker")
+        victim = death.get("user_name") or death.get("victim_name")
+        current_round = round_number(death_tick)
+        if current_round not in opening_rounds:
+            if attacker in by_player:
+                by_player[attacker]["opening_kills"] += 1
+            if victim in by_player:
+                by_player[victim]["opening_deaths"] += 1
+            opening_rounds.add(current_round)
+    for index, death in enumerate(sorted(deaths, key=lambda event: int(event.get("tick") or 0))):
+        try:
+            death_tick = int(death.get("tick") or 0)
+        except (TypeError, ValueError):
+            continue
+        attacker = death.get("attacker_name") or death.get("attacker")
+        victim = death.get("user_name") or death.get("victim_name")
+        for previous in sorted(deaths, key=lambda event: int(event.get("tick") or 0))[:index][::-1]:
+            try:
+                previous_tick = int(previous.get("tick") or 0)
+            except (TypeError, ValueError):
+                continue
+            if death_tick - previous_tick > 320:
+                break
+            previous_attacker = previous.get("attacker_name") or previous.get("attacker")
+            previous_victim = previous.get("user_name") or previous.get("victim_name")
+            if attacker == previous_victim and victim != previous_attacker and attacker in by_player:
+                by_player[attacker]["trade_kills"] += 1
+                if victim in by_player:
+                    by_player[victim]["trade_deaths"] += 1
+                break
+    for event in bomb_plants + bomb_defuses:
+        player_name = event.get("user_name") or event.get("player_name") or event.get("userid")
+        if player_name in by_player:
+            by_player[player_name]["objective_events"] += 1
     reference = max(by_player.values(), key=lambda player: player.get("kills", 0), default=None)
     reference_team = snapshot_teams.get(reference.get("player")) if reference else None
     teams_by_round_tick = {}
@@ -520,6 +603,10 @@ def analyze(path, filename, preferred_steamid=None):
         utility_per_round = player.get("utility_damage", 0) / rounds_seen
         flashes_per_round = player.get("flashes", 0) / rounds_seen
         player["utility_rating"] = round(min(100, 100 * (0.7 * min(utility_per_round / 20, 1) + 0.3 * min(flashes_per_round / 1.5, 1))), 1)
+        player["kast"] = round((player["kills"] + player["assists"] + (rounds_seen - player["deaths"])) / max(rounds_seen, 1) * 100, 1)
+        player["opening_diff"] = player["opening_kills"] - player["opening_deaths"]
+        player["trade_diff"] = player["trade_kills"] - player["trade_deaths"]
+        player["match_rating"] = round(max(0, min(100, 45 + min(player["kd"], 3) * 7 + min(player["adr"], 120) * 0.08 + player["headshot_rate"] * 0.04 + player["utility_rating"] * 0.08 + player["opening_diff"] * 2 + player["trade_diff"] * 1.5 + player["objective_events"] * 1.5 + (5 if match_result == "WIN" else -5 if match_result == "LOSS" else 0))), 1)
         # Keep the legacy field for saved UI data, but make it the exact score.
         player["impact"] = player["impact_score"]
     primary_player = None
@@ -529,7 +616,7 @@ def analyze(path, filename, preferred_steamid=None):
             primary_player = matching_info.get("player_name") or matching_info.get("name")
     if not primary_player and reference:
         primary_player = reference.get("player")
-    return clean({"file": filename, "primary_player": primary_player, "primary_team": snapshot_teams.get(primary_player), "header": header, "rounds": rounds, "round_wins": round_wins, "round_losses": round_losses, "match_result": match_result, "positions": positions, "deaths": deaths, "players": list(by_player.values()), "capabilities": ["kills", "deaths", "assists", "headshots", "weapon shots", "weapon hits", "damage", "utility damage", "flashes", "rounds", "player roster", "event positions"]})
+    return clean({"file": filename, "primary_player": primary_player, "primary_team": snapshot_teams.get(primary_player), "header": header, "rounds": rounds, "round_starts": round_starts, "round_wins": round_wins, "round_losses": round_losses, "match_result": match_result, "positions": positions, "deaths": deaths, "players": list(by_player.values()), "capabilities": ["kills", "deaths", "assists", "headshots", "opening duels", "trade kills", "KAST", "objectives", "weapon shots", "weapon hits", "damage", "utility damage", "flashes", "rounds", "player roster", "event positions"]})
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -598,8 +685,28 @@ class Handler(SimpleHTTPRequestHandler):
         if self.path == "/api/steam/gc/results":
             status = STEAM_GC.status()
             self.end_json(200, {**status, "matches": STEAM_GC.matches}); return
+        if self.path.startswith("/api/steam/gc/download/status"):
+            job_id = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query).get("job", [""])[-1]
+            with DOWNLOAD_JOBS_LOCK:
+                job = DOWNLOAD_JOBS.get(job_id)
+            if not job:
+                self.end_json(404, {"error": "Replay download job was not found."}); return
+            self.end_json(200, {"job": job_id, **job}); return
         if self.path == "/api/library":
             self.end_json(200, {"results": load_library()}); return
+        if self.path.startswith("/api/library/report"):
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            requested = query.get("key", [""])[-1]
+            entry = next((item for item in load_library() if requested and (requested == analysis_key(item) or requested in {str(item.get(field) or "") for field in ("match_id", "demo_hash", "stored_file", "file")})), None)
+            report = None
+            if entry and entry.get("report_file"):
+                try:
+                    report = json.loads((REPORT_ROOT / Path(str(entry["report_file"])).name).read_text(encoding="utf-8"))
+                except (OSError, ValueError, TypeError):
+                    report = None
+            if not report:
+                self.end_json(404, {"error": "Match report was not found."}); return
+            self.end_json(200, report); return
         if self.path == "/api/steam/sync":
             if not STEAM_SESSION or not STEAM_CONFIG:
                 self.end_json(400, {"error": "Connect Steam and provide a Game Authentication Code plus recent match-sharing code first."}); return
@@ -677,7 +784,7 @@ class Handler(SimpleHTTPRequestHandler):
         steamid = urllib.parse.quote(str(STEAM_SESSION["steamid"]), safe="")
         return open_uri(f"https://steamcommunity.com/profiles/{steamid}/gcpd/730?tab=matchmaking")
 
-    def download_gc_replay(self, replay_url, match_id=""):
+    def download_gc_replay(self, replay_url, match_id="", progress=None):
         """Download a Valve replay URL returned by the authenticated CS2 GC."""
         parsed = urllib.parse.urlsplit(str(replay_url))
         if (
@@ -693,6 +800,8 @@ class Handler(SimpleHTTPRequestHandler):
             raise ValueError("CS2 replay URL did not contain a demo file.")
         destination = DEMO_ROOT / filename
         try:
+            if progress:
+                progress("Downloading replay from Valve…")
             request = urllib.request.Request(str(replay_url), headers={"User-Agent": "Freetify/1.0"})
             with urllib.request.urlopen(request, timeout=45) as response, compressed.open("wb") as output:
                 final = urllib.parse.urlsplit(response.geturl())
@@ -710,13 +819,19 @@ class Handler(SimpleHTTPRequestHandler):
                     if total > 2 * 1024 * 1024 * 1024:
                         raise ValueError("The replay is too large to download safely.")
                     output.write(chunk)
+            if progress:
+                progress("Decompressing replay…")
             with bz2.open(compressed, "rb") as source, destination.open("wb") as output:
                 shutil.copyfileobj(source, output, length=1024 * 1024)
+            if progress:
+                progress("Analyzing demo locally…")
             result = analyze(str(destination), destination.name, STEAM_SESSION.get("steamid") if STEAM_SESSION else None)
             result["stored"] = True
             result["stored_file"] = destination.name
             result["match_id"] = str(match_id or "")
             result["demo_hash"] = demo_digest(destination)
+            if progress:
+                progress("Saving local match report…")
             store_analysis(result)
             return result
         finally:
@@ -745,8 +860,52 @@ class Handler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def start_download_job(self, replay_url, match_id):
+        job_id = uuid.uuid4().hex
+        with DOWNLOAD_JOBS_LOCK:
+            DOWNLOAD_JOBS[job_id] = {"state": "queued", "detail": "Queued for local download…"}
+        def update(detail):
+            with DOWNLOAD_JOBS_LOCK:
+                DOWNLOAD_JOBS[job_id].update({"state": "working", "detail": detail})
+        def run():
+            try:
+                result = self.download_gc_replay(replay_url, match_id, update)
+                with DOWNLOAD_JOBS_LOCK:
+                    DOWNLOAD_JOBS[job_id].update({"state": "complete", "detail": "Downloaded and analyzed.", "result": analysis_summary(result)})
+            except Exception as exc:
+                print(f"CS2 replay download error: {exc!r}", file=sys.stderr, flush=True)
+                with DOWNLOAD_JOBS_LOCK:
+                    DOWNLOAD_JOBS[job_id].update({"state": "failed", "detail": f"Could not download this CS2 replay: {exc}"})
+        threading.Thread(target=run, daemon=True).start()
+        return job_id
+
     def do_POST(self):
         global STEAM_CONFIG
+        if self.path == "/api/library/delete":
+            length = int(self.headers.get("Content-Length", "0"))
+            try:
+                payload = json.loads(self.rfile.read(length))
+                requested = str(payload.get("key") or "").strip()
+                with LIBRARY_LOCK:
+                    library = load_library()
+                    removed = next((item for item in library if requested and requested in {str(item.get(field) or "") for field in ("match_id", "demo_hash", "stored_file", "file")}), None)
+                    if not removed:
+                        self.end_json(404, {"error": "Match was not found in the local library."}); return
+                    library = [item for item in library if item is not removed]
+                    temporary = LIBRARY_FILE.with_suffix(".tmp")
+                    temporary.write_text(json.dumps(library[:100]), encoding="utf-8")
+                    os.replace(temporary, LIBRARY_FILE)
+                stored_file = Path(str(removed.get("stored_file") or "")).name
+                demo = DEMO_ROOT / stored_file
+                if stored_file and demo.parent == DEMO_ROOT and demo.suffix.lower() == ".dem":
+                    demo.unlink(missing_ok=True)
+                report_file = Path(str(removed.get("report_file") or "")).name
+                report = REPORT_ROOT / report_file
+                if report_file and report.parent == REPORT_ROOT and report.suffix.lower() == ".json":
+                    report.unlink(missing_ok=True)
+                self.end_json(200, {"ok": True}); return
+            except (ValueError, TypeError, OSError) as exc:
+                self.end_json(400, {"error": f"Could not delete the local match: {exc}"}); return
         if self.path == "/api/library/import":
             length = int(self.headers.get("Content-Length", "0"))
             try:
@@ -771,10 +930,10 @@ class Handler(SimpleHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", "0"))
             try:
                 payload = json.loads(self.rfile.read(length))
-                result = self.download_gc_replay(payload.get("replay_url", ""), payload.get("match_id", ""))
-                self.end_json(200, {"ok": True, "result": result}); return
-            except (OSError, ValueError, urllib.error.URLError, EOFError) as exc:
-                self.end_json(400, {"error": f"Could not download this CS2 replay: {exc}"}); return
+                job = self.start_download_job(payload.get("replay_url", ""), payload.get("match_id", ""))
+                self.end_json(202, {"ok": True, "job": job, "detail": "Queued for local download…"}); return
+            except (ValueError, TypeError) as exc:
+                self.end_json(400, {"error": f"Could not start this CS2 replay download: {exc}"}); return
             except Exception as exc:
                 print(f"CS2 replay download error: {exc!r}", file=sys.stderr, flush=True)
                 self.end_json(500, {"error": "Freetify downloaded the replay but could not analyze it."}); return

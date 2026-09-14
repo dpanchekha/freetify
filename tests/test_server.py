@@ -71,6 +71,8 @@ class AnalysisTests(unittest.TestCase):
         self.assertGreater(players["Alpha"]["aim_rating"], 0)
         self.assertGreaterEqual(players["Alpha"]["utility_rating"], 0)
         self.assertGreater(players["Alpha"]["impact"], 0)
+        self.assertGreater(players["Alpha"]["match_rating"], 0)
+        self.assertIn("opening duels", result["capabilities"])
         self.assertTrue(result["positions"])
 
     def test_event_ticks_ignores_invalid_values(self):
@@ -120,6 +122,13 @@ class AnalysisTests(unittest.TestCase):
             self.assertTrue(library[0]["saved_at"])
         finally:
             server.LIBRARY_FILE = original_file
+
+    def test_download_summary_excludes_large_position_payload(self):
+        summary = server.analysis_summary({"file": "match.dem", "players": [{"player": "Alpha"}], "positions": [{"X": 1}], "deaths": [{"tick": 1}]})
+        self.assertEqual(summary["file"], "match.dem")
+        self.assertTrue(summary["summary_only"])
+        self.assertNotIn("positions", summary)
+        self.assertNotIn("deaths", summary)
 
 
 if __name__ == "__main__":

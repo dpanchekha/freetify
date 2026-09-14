@@ -61,4 +61,4 @@ Not yet implemented:
 - A signed installer (the generated installer is currently unsigned, so Windows SmartScreen may show a warning)
 - Automatic replay-download URLs from every returned CS2 match (CS2 availability varies and this is still being wired into the local demo library)
 
-The parser is powered by [`demoparser2`](https://github.com/RPSam/demoparser2). Freetify is a functional native desktop analysis app with local match reports and a lightweight event viewer; it is not yet a complete Leetify replacement.
+The parser is powered by [`LaihoE/demoparser`](https://github.com/LaihoE/demoparser) through its `demoparser2` Python package. Freetify is a functional native desktop analysis app with local match reports and a lightweight event viewer; it is not yet a complete Leetify replacement.
