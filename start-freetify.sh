@@ -7,4 +7,5 @@ if [[ ! -x ".venv/bin/python" ]]; then
   exit 1
 fi
 
-exec ".venv/bin/python" server.py
+nohup ".venv/bin/python" server.py > freetify.log 2>&1 &
+echo "Freetify is running in the background. Logs: $(pwd)/freetify.log"

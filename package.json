@@ -1,0 +1,12 @@
+{
+  "name": "freetify-steam-bridge",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Local Steam Game Coordinator bridge for Freetify",
+  "dependencies": {
+    "node-cs2": "2.4.1",
+    "qrcode": "1.5.4",
+    "steam-session": "1.9.4",
+    "steam-user": "5.3.0"
+  }
+}

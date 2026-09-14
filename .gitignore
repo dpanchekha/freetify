@@ -1,8 +1,10 @@
 __pycache__/
 *.py[cod]
 .venv/
+node_modules/
 build/
 dist/
 Output/
 *.spec
+freetify.log
 .DS_Store

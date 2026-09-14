@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 """Local-only Freetify server and CS2 demo analysis endpoint."""
+import bz2
+import hashlib
 import json
 import math
 import os
@@ -9,7 +11,9 @@ import sys
 import threading
 import urllib.parse
 import urllib.request
+import urllib.error
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from email.parser import BytesParser
 from email.policy import default
@@ -29,10 +33,260 @@ def app_data_root():
 DATA_ROOT = app_data_root()
 DEMO_ROOT = DATA_ROOT / "demos"
 DEMO_ROOT.mkdir(parents=True, exist_ok=True)
+STATE_FILE = DATA_ROOT / "state.json"
+LIBRARY_FILE = DATA_ROOT / "library.json"
+LIBRARY_LOCK = threading.Lock()
 STEAM_SESSION = None
 STEAM_CONFIG = {}
+STEAM_GC_REFRESH_TOKEN = None
 STEAM_ERROR = None
 STEAM_CALLBACK = ""
+
+
+def load_state():
+    try:
+        state = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+        return state.get("steam_session"), state.get("steam_config", {}), state.get("steam_gc_refresh_token")
+    except (OSError, ValueError, TypeError):
+        return None, {}, None
+
+
+def save_state():
+    state = {
+        "steam_session": STEAM_SESSION,
+        "steam_config": STEAM_CONFIG,
+        "steam_gc_refresh_token": STEAM_GC_REFRESH_TOKEN,
+    }
+    temporary = STATE_FILE.with_suffix(".tmp")
+    try:
+        temporary.write_text(json.dumps(state), encoding="utf-8")
+        try:
+            temporary.chmod(0o600)
+        except OSError:
+            pass
+        os.replace(temporary, STATE_FILE)
+        try:
+            STATE_FILE.chmod(0o600)
+        except OSError:
+            pass
+    except OSError:
+        try:
+            temporary.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def load_library():
+    try:
+        library = json.loads(LIBRARY_FILE.read_text(encoding="utf-8"))
+        if not isinstance(library, list):
+            return []
+        unique, seen = [], set()
+        for item in library:
+            if not isinstance(item, dict):
+                continue
+            key = analysis_key(item)
+            if key and key in seen:
+                continue
+            if key:
+                seen.add(key)
+            unique.append(item)
+        return sorted(unique, key=lambda item: str(item.get("saved_at") or ""), reverse=True)
+    except (OSError, ValueError, TypeError):
+        return []
+
+
+def store_analysis(result):
+    """Keep local analysis reports independent of browser localStorage."""
+    stored = clean(result)
+    stored["saved_at"] = datetime.now(timezone.utc).isoformat()
+    result["saved_at"] = stored["saved_at"]
+    key = analysis_key(stored)
+    if not key:
+        return
+    with LIBRARY_LOCK:
+        library = [item for item in load_library() if analysis_key(item) != key]
+        library.insert(0, stored)
+        temporary = LIBRARY_FILE.with_suffix(".tmp")
+        try:
+            temporary.write_text(json.dumps(library[:100]), encoding="utf-8")
+            try:
+                temporary.chmod(0o600)
+            except OSError:
+                pass
+            os.replace(temporary, LIBRARY_FILE)
+            try:
+                LIBRARY_FILE.chmod(0o600)
+            except OSError:
+                pass
+        except OSError:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def analysis_key(result):
+    """Stable identity: a Steam match id wins, then content hash, then filename."""
+    if not isinstance(result, dict):
+        return ""
+    for field in ("match_id", "demo_hash", "stored_file", "file"):
+        value = str(result.get(field) or "").strip()
+        if value:
+            return f"{field}:{value}"
+    return ""
+
+
+def demo_digest(path):
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as source:
+        for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+STEAM_SESSION, STEAM_CONFIG, STEAM_GC_REFRESH_TOKEN = load_state()
+
+
+class SteamGameCoordinator:
+    """Run the Node Steam/CS2 helper as a private JSON-lines child process."""
+
+    def __init__(self):
+        self.process = None
+        self.lock = threading.Lock()
+        self.state = "disconnected"
+        self.detail = "Not connected to CS2 match history."
+        self.steamid = None
+        self.qr_image = None
+        self.matches = []
+        self.started_with_token = False
+
+    def node_command(self):
+        packaged = APP_ROOT / ("node.exe" if sys.platform.startswith("win") else "node")
+        if packaged.is_file():
+            return str(packaged)
+        return shutil.which("node")
+
+    def ensure_process(self):
+        with self.lock:
+            if self.process and self.process.poll() is None:
+                return True
+            node = self.node_command()
+            script = APP_ROOT / "steam_gc_sidecar.js"
+            if not node or not script.is_file():
+                self.state = "unavailable"
+                self.detail = "The local Steam bridge is missing. Reinstall Freetify."
+                return False
+            try:
+                env = os.environ.copy()
+                env["NODE_PATH"] = str(APP_ROOT / "node_modules")
+                self.process = subprocess.Popen(
+                    [node, str(script)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    text=True, bufsize=1, cwd=str(APP_ROOT), env=env,
+                )
+            except OSError as exc:
+                self.state = "unavailable"
+                self.detail = f"Could not start the local Steam bridge: {exc}"
+                return False
+            threading.Thread(target=self._read_output, args=(self.process.stdout,), daemon=True).start()
+            threading.Thread(target=self._read_errors, args=(self.process.stderr,), daemon=True).start()
+            return True
+
+    def _read_errors(self, stream):
+        for line in stream:
+            print(f"Steam GC bridge: {line.rstrip()}", file=sys.stderr, flush=True)
+
+    def _read_output(self, stream):
+        for line in stream:
+            try:
+                event = json.loads(line)
+            except ValueError:
+                print(f"Steam GC bridge sent invalid JSON: {line.rstrip()}", file=sys.stderr, flush=True)
+                continue
+            self._handle_event(event)
+
+    def _handle_event(self, event):
+        global STEAM_GC_REFRESH_TOKEN, STEAM_SESSION
+        event_type = event.get("type")
+        with self.lock:
+            if event.get("state"):
+                self.state = event["state"]
+            if event.get("detail"):
+                self.detail = str(event["detail"])
+            if event.get("steamid"):
+                self.steamid = str(event["steamid"])
+            if event_type == "qr":
+                self.qr_image = event.get("image")
+            elif event_type == "matches":
+                self.matches = event.get("matches") or []
+                self.state = "ready"
+                self.detail = f"Found {len(self.matches)} recent CS2 match{'es' if len(self.matches) != 1 else ''}."
+            elif event_type == "refresh_token":
+                token = event.get("refresh_token")
+                if isinstance(token, str) and token:
+                    STEAM_GC_REFRESH_TOKEN = token
+                    self.started_with_token = True
+                    if self.steamid:
+                        STEAM_SESSION = {"steamid": self.steamid}
+                    save_state()
+            elif event_type == "error":
+                self.state = "error"
+                print(f"Steam GC bridge error: {self.detail}", file=sys.stderr, flush=True)
+
+    def send(self, payload):
+        if not self.ensure_process():
+            return False
+        try:
+            with self.lock:
+                self.process.stdin.write(json.dumps(payload) + "\n")
+                self.process.stdin.flush()
+            return True
+        except (OSError, ValueError, AttributeError):
+            self.state = "error"
+            self.detail = "The local Steam bridge stopped unexpectedly."
+            return False
+
+    def start_saved_session(self):
+        global STEAM_GC_REFRESH_TOKEN
+        if STEAM_GC_REFRESH_TOKEN and not self.started_with_token:
+            self.started_with_token = self.send({"type": "connect", "refresh_token": STEAM_GC_REFRESH_TOKEN})
+        return self.status()
+
+    def start_qr(self):
+        self.qr_image = None
+        self.matches = []
+        return self.send({"type": "start_qr"})
+
+    def request_recent_matches(self):
+        return self.send({"type": "recent_matches"})
+
+    def status(self):
+        with self.lock:
+            return {
+                "available": self.state != "unavailable",
+                "connected": self.state in ("ready", "loading_matches"),
+                "state": self.state,
+                "detail": self.detail,
+                "steamid": self.steamid,
+                "qr_image": self.qr_image,
+                "match_count": len(self.matches),
+            }
+
+    def shutdown(self):
+        with self.lock:
+            process = self.process
+        if not process or process.poll() is not None:
+            return
+        try:
+            process.stdin.write(json.dumps({"type": "shutdown"}) + "\n")
+            process.stdin.flush()
+            process.wait(timeout=3)
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            try:
+                process.terminate()
+            except OSError:
+                pass
+
+
+STEAM_GC = SteamGameCoordinator()
 
 
 def valid_steam_return(returned, expected):
@@ -139,6 +393,7 @@ def analyze(path, filename, preferred_steamid=None):
     deaths = safe_event(parser, "player_death")
     hurts = safe_event(parser, "player_hurt")
     blinds = safe_event(parser, "player_blind")
+    shots = safe_event(parser, "weapon_fire")
     rounds = safe_event(parser, "round_end")
     players = records(parser.parse_player_info())
     snapshots = []
@@ -157,7 +412,11 @@ def analyze(path, filename, preferred_steamid=None):
             max_tick = 0
     if max_tick:
         try:
-            sample_step = max(64, max_tick // 240)
+            # A demo used to be reduced to roughly 240 snapshots.  That was
+            # enough for a static heatmap but made the playback appear to jump
+            # between locations. Keep up to ~6,000 real game snapshots (and
+            # never skip more than four ticks on shorter demos).
+            sample_step = max(4, max_tick // 6000)
             sample_ticks = list(range(0, max_tick + 1, sample_step))
             positions = records(parser.parse_ticks(["X", "Y", "player_name", "team_num", "game_time"], ticks=sample_ticks))
         except Exception:
@@ -183,37 +442,61 @@ def analyze(path, filename, preferred_steamid=None):
         if assister:
             item = by_player.setdefault(assister, {"player": assister, "kills": 0, "deaths": 0, "assists": 0, "headshots": 0, "damage": 0, "weapons": {}})
             item["assists"] += 1
+    for shot in shots:
+        shooter = shot.get("user_name") or shot.get("player_name") or shot.get("user") or shot.get("userid")
+        if shooter:
+            item = by_player.setdefault(shooter, {"player": shooter, "kills": 0, "deaths": 0, "assists": 0, "headshots": 0, "damage": 0, "weapons": {}})
+            item["shots"] = item.get("shots", 0) + 1
     for hurt in hurts:
         attacker = hurt.get("attacker_name") or hurt.get("attacker")
         if attacker:
             item = by_player.setdefault(attacker, {"player": attacker, "kills": 0, "deaths": 0, "assists": 0, "headshots": 0, "damage": 0, "weapons": {}})
             item["damage"] += int(hurt.get("dmg_health") or hurt.get("damage") or 0)
+            item["hits"] = item.get("hits", 0) + 1
             if str(hurt.get("weapon", "")).lower() in ("hegrenade", "molotov", "incgrenade", "inferno", "firecrackerblast"):
                 item["utility_damage"] = item.get("utility_damage", 0) + int(hurt.get("dmg_health") or hurt.get("damage") or 0)
     for blind in blinds:
         attacker = blind.get("attacker_name") or blind.get("attacker")
-        if attacker:
+        attacker_team = blind.get("attacker_team") or blind.get("attacker_team_num")
+        victim_team = blind.get("user_team") or blind.get("user_team_num")
+        if attacker and (attacker_team is None or victim_team is None or str(attacker_team) != str(victim_team)):
             item = by_player.setdefault(attacker, {"player": attacker, "kills": 0, "deaths": 0, "assists": 0, "headshots": 0, "damage": 0, "weapons": {}})
             item["flashes"] = item.get("flashes", 0) + 1
+            item["flash_seconds"] = round(item.get("flash_seconds", 0) + float(blind.get("blind_duration") or blind.get("blind_time") or 0), 2)
     aggregate_fields = {"kills_total": "kills", "deaths_total": "deaths", "assists_total": "assists", "headshot_kills_total": "headshots", "damage_total": "damage", "utility_damage_total": "utility_damage", "enemies_flashed_total": "flashes"}
     for snapshot in snapshots:
         name = snapshot.get("player_name") or snapshot.get("name")
         if not name:
             continue
         item = by_player.setdefault(name, {"player": name, "kills": 0, "deaths": 0, "assists": 0, "headshots": 0, "damage": 0, "weapons": {}})
+        if snapshot.get("team_num") is not None:
+            item["team_num"] = snapshot.get("team_num")
         for source, target in aggregate_fields.items():
             if snapshot.get(source) is not None:
                 item[target] = max(item.get(target, 0), int(snapshot[source] or 0))
     snapshot_teams = {(snapshot.get("player_name") or snapshot.get("name")): snapshot.get("team_num") for snapshot in snapshots if snapshot.get("player_name") or snapshot.get("name")}
     reference = max(by_player.values(), key=lambda player: player.get("kills", 0), default=None)
     reference_team = snapshot_teams.get(reference.get("player")) if reference else None
+    teams_by_round_tick = {}
+    if reference and round_ticks:
+        try:
+            for team_sample in records(parser.parse_ticks(["player_name", "team_num"], ticks=round_ticks)):
+                if (team_sample.get("player_name") or team_sample.get("name")) == reference.get("player") and team_sample.get("tick") is not None:
+                    teams_by_round_tick[int(team_sample["tick"])] = team_sample.get("team_num")
+        except Exception:
+            pass
     round_wins = round_losses = 0
     for round_event in rounds:
         winner = str(round_event.get("winner", "")).upper()
         winner_team = 3 if "CT" in winner else 2 if winner in ("T", "TERRORIST") else None
-        if winner_team and reference_team:
+        try:
+            round_tick = int(round_event.get("tick"))
+        except (TypeError, ValueError):
+            round_tick = -1
+        round_team = teams_by_round_tick.get(round_tick, reference_team)
+        if winner_team and round_team:
             try:
-                same_team = int(reference_team) == winner_team
+                same_team = int(round_team) == winner_team
             except (TypeError, ValueError):
                 same_team = False
             if same_team:
@@ -221,11 +504,24 @@ def analyze(path, filename, preferred_steamid=None):
             else:
                 round_losses += 1
     match_result = "WIN" if round_wins > round_losses else "LOSS" if round_losses > round_wins else "TIE" if rounds else "UNKNOWN"
+    rounds_seen = max(len(rounds), 1)
     for player in by_player.values():
         player["kd"] = round(player["kills"] / max(player["deaths"], 1), 2)
         player["headshot_rate"] = round(player["headshots"] / max(player["kills"], 1) * 100, 1)
-        rounds_seen = max(len(rounds), 1)
-        player["impact"] = round(0.8 + (player["kills"] / rounds_seen) * 0.7 + (player.get("damage", 0) / rounds_seen / 100) * 0.3 + (player.get("assists", 0) / rounds_seen) * 0.15 - (player["deaths"] / rounds_seen) * 0.25, 2)
+        player["adr"] = round(player.get("damage", 0) / rounds_seen, 2)
+        player["impact_score"] = round(player["kd"] * player["adr"], 2)
+        player["shots"] = player.get("shots", 0)
+        player["hits"] = player.get("hits", 0)
+        player["accuracy"] = round(player["hits"] / max(player["shots"], 1) * 100, 1) if player["shots"] else None
+        # These are transparent event-derived indicators, not a proprietary aim model.
+        accuracy_component = (player["accuracy"] or 0) / 100
+        headshot_component = player["headshot_rate"] / 100
+        player["aim_rating"] = round(100 * (0.65 * accuracy_component + 0.35 * headshot_component), 1)
+        utility_per_round = player.get("utility_damage", 0) / rounds_seen
+        flashes_per_round = player.get("flashes", 0) / rounds_seen
+        player["utility_rating"] = round(min(100, 100 * (0.7 * min(utility_per_round / 20, 1) + 0.3 * min(flashes_per_round / 1.5, 1))), 1)
+        # Keep the legacy field for saved UI data, but make it the exact score.
+        player["impact"] = player["impact_score"]
     primary_player = None
     if preferred_steamid:
         matching_info = next((info for info in players if str(info.get("player_steamid") or info.get("steamid") or info.get("steam_id")) == str(preferred_steamid)), None)
@@ -233,7 +529,7 @@ def analyze(path, filename, preferred_steamid=None):
             primary_player = matching_info.get("player_name") or matching_info.get("name")
     if not primary_player and reference:
         primary_player = reference.get("player")
-    return clean({"file": filename, "primary_player": primary_player, "header": header, "rounds": rounds, "round_wins": round_wins, "round_losses": round_losses, "match_result": match_result, "positions": positions, "deaths": deaths, "players": list(by_player.values()), "capabilities": ["kills", "deaths", "assists", "headshots", "damage", "utility damage", "flashes", "rounds", "player roster", "event positions"]})
+    return clean({"file": filename, "primary_player": primary_player, "primary_team": snapshot_teams.get(primary_player), "header": header, "rounds": rounds, "round_wins": round_wins, "round_losses": round_losses, "match_result": match_result, "positions": positions, "deaths": deaths, "players": list(by_player.values()), "capabilities": ["kills", "deaths", "assists", "headshots", "weapon shots", "weapon hits", "damage", "utility damage", "flashes", "rounds", "player roster", "event positions"]})
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -245,7 +541,8 @@ class Handler(SimpleHTTPRequestHandler):
         if self.path == "/auth/steam":
             STEAM_ERROR = None
             realm = STEAM_CALLBACK.rsplit("/auth/", 1)[0] + "/"
-            query = urllib.parse.urlencode({"openid.ns": "http://specs.openid.net/auth/2.0", "openid.mode": "checkid_setup", "openid.return_to": STEAM_CALLBACK, "openid.realm": realm, "openid.identity": "http://specs.openid.net/auth/2.0/identifier", "openid.claimed_id": "http://specs.openid.net/auth/2.0/identifier"})
+            identifier_select = "http://specs.openid.net/auth/2.0/identifier_select"
+            query = urllib.parse.urlencode({"openid.ns": "http://specs.openid.net/auth/2.0", "openid.mode": "checkid_setup", "openid.return_to": STEAM_CALLBACK, "openid.realm": realm, "openid.identity": identifier_select, "openid.claimed_id": identifier_select})
             self.send_response(302); self.send_header("Location", f"https://steamcommunity.com/openid/login?{query}"); self.end_headers(); return
         if self.path.startswith("/auth/steam/callback"):
             params = {key: values[-1] for key, values in urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query).items()}
@@ -268,6 +565,7 @@ class Handler(SimpleHTTPRequestHandler):
                     if verified:
                         STEAM_SESSION = {"steamid": claimed.rsplit("/", 1)[-1]}
                         STEAM_ERROR = None
+                        save_state()
                         authenticated = True
                     else:
                         STEAM_ERROR = "Steam rejected the sign-in verification."
@@ -277,25 +575,71 @@ class Handler(SimpleHTTPRequestHandler):
                 STEAM_ERROR = "Steam returned an invalid sign-in response (callback or identity mismatch)."
             self.send_response(302); self.send_header("Location", "/?steam=connected" if authenticated else "/?steam=error"); self.end_headers(); return
         if self.path == "/api/steam":
-            self.end_json(200, {"connected": STEAM_SESSION is not None, "sync_ready": bool(STEAM_CONFIG), "error": STEAM_ERROR, **(STEAM_SESSION or {})}); return
+            gc_status = STEAM_GC.start_saved_session()
+            self.end_json(200, {
+                "connected": STEAM_SESSION is not None,
+                "sync_ready": bool(STEAM_CONFIG),
+                "gc_saved": bool(STEAM_GC_REFRESH_TOKEN),
+                "gc": gc_status,
+                "error": STEAM_ERROR,
+                **(STEAM_SESSION or {}),
+            }); return
+        if self.path == "/api/steam/gc/status":
+            self.end_json(200, STEAM_GC.start_saved_session()); return
+        if self.path == "/api/steam/gc/matches":
+            status = STEAM_GC.start_saved_session()
+            if not status["available"]:
+                self.end_json(503, {"error": status["detail"]}); return
+            if status["state"] != "ready":
+                self.end_json(409, {"error": status["detail"], "state": status["state"]}); return
+            if not STEAM_GC.request_recent_matches():
+                self.end_json(502, {"error": "Could not ask the local Steam bridge for matches."}); return
+            self.end_json(202, {"ok": True, "detail": "Requesting recent matches from CS2."}); return
+        if self.path == "/api/steam/gc/results":
+            status = STEAM_GC.status()
+            self.end_json(200, {**status, "matches": STEAM_GC.matches}); return
+        if self.path == "/api/library":
+            self.end_json(200, {"results": load_library()}); return
         if self.path == "/api/steam/sync":
             if not STEAM_SESSION or not STEAM_CONFIG:
                 self.end_json(400, {"error": "Connect Steam and provide a Game Authentication Code plus recent match-sharing code first."}); return
-            known = STEAM_CONFIG["share_code"].upper()
+            # Share-code characters are case-sensitive; preserve the exact code
+            # copied from Steam while using uppercase only for format checks.
+            known = STEAM_CONFIG["share_code"]
             new_codes = []
             try:
                 for _ in range(20):
                     query = urllib.parse.urlencode({"key": STEAM_CONFIG["api_key"], "steamid": STEAM_SESSION["steamid"], "steamidkey": STEAM_CONFIG["auth_code"], "knowncode": known})
-                    with urllib.request.urlopen(f"https://api.steampowered.com/ICSGOPlayers_730/GetNextMatchSharingCode/v1/?{query}", timeout=15) as response:
+                    request = urllib.request.Request(f"https://api.steampowered.com/ICSGOPlayers_730/GetNextMatchSharingCode/v1/?{query}")
+                    with urllib.request.urlopen(request, timeout=15) as response:
                         payload = json.loads(response.read())
                     data = payload.get("result", payload)
-                    next_code = str(data.get("nextcode", "")).upper()
+                    next_code = str(data.get("nextcode", "")).strip()
                     if not next_code or next_code == known:
                         break
                     new_codes.append(next_code); known = next_code
-                download_codes = [STEAM_CONFIG["share_code"].upper(), *new_codes]
+                download_codes = [STEAM_CONFIG["share_code"], *new_codes]
                 self.end_json(200, {"ok": True, "codes": download_codes, "launched": 0})
+            except urllib.error.HTTPError as exc:
+                try:
+                    response_body = exc.read().decode("utf-8", errors="replace").strip()
+                except Exception:
+                    response_body = ""
+                response_body = response_body[:500] or "(empty response)"
+                print(
+                    "Steam sync HTTP error: "
+                    f"status={exc.code} reason={exc.reason!s} "
+                    f"steamid={STEAM_SESSION.get('steamid')} "
+                    f"share_prefix={STEAM_CONFIG['share_code'][:5]} "
+                    f"share_length={len(STEAM_CONFIG['share_code'])} "
+                    f"api_key_query={bool(STEAM_CONFIG.get('api_key'))} "
+                    f"body={response_body}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                self.end_json(502, {"error": f"Steam sync failed ({exc.code}): {response_body}"})
             except Exception as exc:
+                print(f"Steam sync error: {exc!r}", file=sys.stderr, flush=True)
                 self.end_json(502, {"error": f"Steam sync failed: {exc}"})
             return
         if self.path == "/api/scan":
@@ -310,6 +654,8 @@ class Handler(SimpleHTTPRequestHandler):
                     result = analyze(str(destination), source.name, STEAM_SESSION.get("steamid") if STEAM_SESSION else None)
                     result["stored"] = True
                     result["stored_file"] = destination.name
+                    result["demo_hash"] = demo_digest(destination)
+                    store_analysis(result)
                     results.append(result)
                 except Exception as exc:
                     results.append({"file": source.name, "error": str(exc)})
@@ -322,8 +668,62 @@ class Handler(SimpleHTTPRequestHandler):
     def launch_steam_demo(self, code):
         if not re.fullmatch(r"CSGO-[A-Z0-9-]+", code.upper()):
             return False
-        uri = f"steam://rungame/730/0/+csgo_download_match%20{urllib.parse.quote(code.upper())}"
+        uri = f"steam://rungame/730/0/+csgo_download_match%20{urllib.parse.quote(code)}"
         return open_uri(uri)
+
+    def open_steam_match_history(self):
+        if not STEAM_SESSION or not STEAM_SESSION.get("steamid"):
+            return False
+        steamid = urllib.parse.quote(str(STEAM_SESSION["steamid"]), safe="")
+        return open_uri(f"https://steamcommunity.com/profiles/{steamid}/gcpd/730?tab=matchmaking")
+
+    def download_gc_replay(self, replay_url, match_id=""):
+        """Download a Valve replay URL returned by the authenticated CS2 GC."""
+        parsed = urllib.parse.urlsplit(str(replay_url))
+        if (
+            parsed.scheme not in ("http", "https")
+            or not re.fullmatch(r"replay[0-9]+\.valve\.net", parsed.hostname or "", re.IGNORECASE)
+            or not parsed.path.startswith("/730/")
+            or not parsed.path.lower().endswith(".dem.bz2")
+        ):
+            raise ValueError("CS2 did not provide a valid Valve replay URL.")
+        compressed = DEMO_ROOT / f".{abs(hash(replay_url))}.dem.bz2.part"
+        filename = Path(urllib.parse.unquote(parsed.path)).name[:-4]
+        if not filename.lower().endswith(".dem"):
+            raise ValueError("CS2 replay URL did not contain a demo file.")
+        destination = DEMO_ROOT / filename
+        try:
+            request = urllib.request.Request(str(replay_url), headers={"User-Agent": "Freetify/1.0"})
+            with urllib.request.urlopen(request, timeout=45) as response, compressed.open("wb") as output:
+                final = urllib.parse.urlsplit(response.geturl())
+                if not re.fullmatch(r"replay[0-9]+\.valve\.net", final.hostname or "", re.IGNORECASE):
+                    raise ValueError("Valve replay download redirected to an unexpected host.")
+                size = int(response.headers.get("Content-Length") or 0)
+                if size > 2 * 1024 * 1024 * 1024:
+                    raise ValueError("The replay is too large to download safely.")
+                total = 0
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    total += len(chunk)
+                    if total > 2 * 1024 * 1024 * 1024:
+                        raise ValueError("The replay is too large to download safely.")
+                    output.write(chunk)
+            with bz2.open(compressed, "rb") as source, destination.open("wb") as output:
+                shutil.copyfileobj(source, output, length=1024 * 1024)
+            result = analyze(str(destination), destination.name, STEAM_SESSION.get("steamid") if STEAM_SESSION else None)
+            result["stored"] = True
+            result["stored_file"] = destination.name
+            result["match_id"] = str(match_id or "")
+            result["demo_hash"] = demo_digest(destination)
+            store_analysis(result)
+            return result
+        finally:
+            try:
+                compressed.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     def launch_local_demo(self, filename):
         raw_name = str(filename)
@@ -347,6 +747,37 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         global STEAM_CONFIG
+        if self.path == "/api/library/import":
+            length = int(self.headers.get("Content-Length", "0"))
+            try:
+                payload = json.loads(self.rfile.read(length))
+                imported = 0
+                for result in payload.get("results", []):
+                    if isinstance(result, dict) and result.get("stored_file"):
+                        store_analysis(result)
+                        imported += 1
+                self.end_json(200, {"ok": True, "imported": imported}); return
+            except (ValueError, TypeError):
+                self.end_json(400, {"error": "Invalid local library import."}); return
+        if self.path == "/api/steam/gc/qr":
+            if not STEAM_GC.start_qr():
+                self.end_json(503, {"error": STEAM_GC.status()["detail"]}); return
+            self.end_json(202, {"ok": True, "detail": "Generating a Steam QR code…"}); return
+        if self.path == "/api/steam/match-history":
+            if self.open_steam_match_history():
+                self.end_json(200, {"ok": True}); return
+            self.end_json(400, {"error": "Connect a Steam account first."}); return
+        if self.path == "/api/steam/gc/download":
+            length = int(self.headers.get("Content-Length", "0"))
+            try:
+                payload = json.loads(self.rfile.read(length))
+                result = self.download_gc_replay(payload.get("replay_url", ""), payload.get("match_id", ""))
+                self.end_json(200, {"ok": True, "result": result}); return
+            except (OSError, ValueError, urllib.error.URLError, EOFError) as exc:
+                self.end_json(400, {"error": f"Could not download this CS2 replay: {exc}"}); return
+            except Exception as exc:
+                print(f"CS2 replay download error: {exc!r}", file=sys.stderr, flush=True)
+                self.end_json(500, {"error": "Freetify downloaded the replay but could not analyze it."}); return
         if self.path == "/api/open-demo":
             length = int(self.headers.get("Content-Length", "0"))
             try:
@@ -379,6 +810,7 @@ class Handler(SimpleHTTPRequestHandler):
                 if len(api_key) < 16 or len(auth_code) < 8 or not share_code.upper().startswith("CSGO-"):
                     self.end_json(400, {"error": "Enter a Steam Web API key, Game Authentication Code, and CSGO match-sharing code."}); return
                 STEAM_CONFIG = {"api_key": api_key, "auth_code": auth_code, "share_code": share_code}
+                save_state()
                 self.end_json(200, {"ok": True}); return
             except Exception:
                 self.end_json(400, {"error": "Invalid sync settings."}); return
@@ -404,6 +836,8 @@ class Handler(SimpleHTTPRequestHandler):
                 result = analyze(temp_path, safe_name, STEAM_SESSION.get("steamid") if STEAM_SESSION else None)
                 result["stored"] = True
                 result["stored_file"] = destination.name
+                result["demo_hash"] = demo_digest(destination)
+                store_analysis(result)
                 results.append(result)
             except Exception as exc:
                 results.append({"file": safe_name, "error": str(exc)})
@@ -418,8 +852,11 @@ if __name__ == "__main__":
         import webview
         print("Freetify desktop app running")
         webview.create_window("Freetify — CS2 Demo Insights", f"http://127.0.0.1:{server.server_port}", width=1440, height=950, min_size=(900, 650))
-        webview.start()
+        webview.start(gui="qt" if sys.platform.startswith("linux") else None)
     except ImportError:
         print("Freetify could not start its native desktop window. Install the dependencies from requirements.txt and try again.", file=sys.stderr)
         server.shutdown()
         raise
+    finally:
+        STEAM_GC.shutdown()
+        server.shutdown()

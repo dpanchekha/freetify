@@ -18,23 +18,35 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
       - name: Install Linux webview dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libgtk-3-0 libgtk-3-dev libwebkit2gtk-4.1-0 libwebkit2gtk-4.1-dev gir1.2-gtk-3.0 gir1.2-webkit2-4.1
       - name: Install build dependencies
-        run: python -m pip install -r requirements.txt pyinstaller
+        run: |
+          python -m pip install -r requirements.txt pyinstaller
+          npm ci --omit=dev
+          mkdir -p runtime
+          cp "$(command -v node)" "runtime/node${{ runner.os == 'Windows' && '.exe' || '' }}"
       - name: Run backend tests
         run: python -m unittest discover -s tests -v
       - name: Build native bundle
         shell: bash
         run: >-
           python -m PyInstaller --noconfirm --clean --onedir --name Freetify
+          --windowed
           --collect-all demoparser2 --collect-all webview
           --add-data "index.html${{ runner.os == 'Windows' && ';' || ':' }}."
           --add-data "app.js${{ runner.os == 'Windows' && ';' || ':' }}."
           --add-data "styles.css${{ runner.os == 'Windows' && ';' || ':' }}."
           --add-data "manifest.webmanifest${{ runner.os == 'Windows' && ';' || ':' }}."
           --add-data "sw.js${{ runner.os == 'Windows' && ';' || ':' }}."
+          --add-data "assets${{ runner.os == 'Windows' && ';' || ':' }}assets"
+          --add-data "steam_gc_sidecar.js${{ runner.os == 'Windows' && ';' || ':' }}."
+          --add-data "node_modules${{ runner.os == 'Windows' && ';' || ':' }}node_modules"
+          --add-binary "runtime/node${{ runner.os == 'Windows' && '.exe' || '' }}${{ runner.os == 'Windows' && ';' || ':' }}."
           server.py
       - uses: actions/upload-artifact@v4
         with:

@@ -22,7 +22,7 @@ After the workflow finishes, download `FreetifySetup.exe` from the repository’
 
 The repository also builds native desktop bundles for Linux and macOS. Those are currently developer artifacts; Windows is the first platform with a user-facing installer.
 
-For developer setup, the repository includes `install-windows.ps1` and `start-freetify.bat` for Windows, plus `start-freetify.sh` for macOS/Linux. These launch the same native app window after dependencies are installed. Freetify does not fall back to opening a browser.
+For developer setup on macOS/Linux, run `./setup.sh` once. It creates `.venv` and installs `requirements.txt` (including pywebview’s Qt backend on Linux); then run `./start-freetify.sh`. The launcher detaches the app and writes server output to `freetify.log`. Windows developers can use `install-windows.ps1` and `start-freetify.bat`. These launch the same native app window after dependencies are installed, without a console window in the packaged/Windows launcher builds. Freetify does not fall back to opening a browser.
 
 Run the dependency-free backend checks with `python -m unittest discover -s tests -v`.
 
@@ -30,7 +30,9 @@ Run the dependency-free backend checks with `python -m unittest discover -s test
 
 Click **Scan for new demos**. Freetify checks common Steam/CS2 demo folders directly and copies found demos into its local app-data library before analyzing them. Use **Settings → Choose folder** if your Steam library is in a custom location. Demos remain on the computer and are never uploaded to a remote service.
 
-To prepare Steam match sync, sign in with Steam in Settings and provide a Steam Web API key, the read-only Game Authentication Code, and a recent `CSGO-...` match-sharing code from CS2. Freetify never asks for or stores your Steam password. The app finds the available share-code sequence, lists the matches, and lets you queue individual replays through Steam/CS2 before scanning the local demo library. Valve may not have every older replay available. Sync credentials are held in memory only.
+For the recommended CS2 match-history connection, click **Connect CS2** in Settings, scan the QR code with the official Steam mobile app, and approve the request. Freetify stores the resulting Steam client refresh token only in its local app-data state file so it can reconnect after restart; it never asks for your Steam password or uploads the token. Once CS2’s Game Coordinator is ready, click **Sync matches** to retrieve your recent match list.
+
+The older **CS2 match sync** fields below it remain as a fallback for users who already have a Steam Web API key, Game Authentication Code, and `CSGO-...` sharing code. That legacy Valve endpoint can reject otherwise valid credentials with HTTP 412, so the QR/Game Coordinator route is preferred.
 
 ## Current status
 
@@ -39,21 +41,24 @@ Implemented:
 - CS2 demo header and round-event parsing
 - Kill, death, and headshot extraction
 - Per-player K/D, headshot-rate, damage, utility, flash, and impact summaries
-- Match detail pages with scoreboards, kill timelines, and a lightweight event-position viewer
+- Match detail pages with a full scoreboard table and high-fidelity, radar-backed movement playback
 - One-click handoff of stored demos to CS2 for full engine playback when Steam is installed
 - Local match-history persistence
 - Automatic scanning of common Steam/CS2 demo folders on Windows, macOS, and Linux
 - Local demo library under the platform-appropriate Freetify app-data directory
 - Secure Steam OpenID sign-in (identity only)
-- Transparent Freetify impact score from parsed combat data
+- Steam QR approval and local CS2 Game Coordinator connection for recent-match discovery
+- Impact Score tracked as K/D × ADR, where ADR is damage per round
 - Windows installer script, desktop launcher, and packaged app build
 - Native bundle workflow for Windows, macOS, and Linux
 
+The bundled radar assets cover Cache, Mirage, Dust II, Inferno, Nuke, Ancient, Anubis, Overpass, Vertigo, and Train. Their coordinate data and radar artwork are extracted from the Valve game depot; the bundled catalog records their source.
+
 Not yet implemented:
 
-- Full 2D map playback with camera controls or round-by-round replay scrubbing
-- Aim, economy, positioning heatmaps, and coaching recommendations
+- Multi-level floor selection for Nuke, Vertigo, and Train; round filters; and camera controls
+- Aim duels, economy, positioning heatmaps, grenade trajectories, and coaching recommendations
 - A signed installer (the generated installer is currently unsigned, so Windows SmartScreen may show a warning)
-- Automatic Steam account match-history discovery without the required Steam codes
+- Automatic replay-download URLs from every returned CS2 match (CS2 availability varies and this is still being wired into the local demo library)
 
 The parser is powered by [`demoparser2`](https://github.com/RPSam/demoparser2). Freetify is a functional native desktop analysis app with local match reports and a lightweight event viewer; it is not yet a complete Leetify replacement.
