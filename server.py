@@ -431,8 +431,17 @@ def analyze(path, filename, preferred_steamid=None):
     shots = safe_event(parser, "weapon_fire")
     rounds = safe_event(parser, "round_end")
     round_starts = safe_event(parser, "round_start")
+    round_freeze_ends = safe_event(parser, "round_freeze_end")
     bomb_plants = safe_event(parser, "bomb_planted")
     bomb_defuses = safe_event(parser, "bomb_defused")
+    bomb_drops = safe_event(parser, "bomb_dropped")
+    bomb_pickups = safe_event(parser, "bomb_pickup")
+    smoke_detonates = safe_event(parser, "smokegrenade_detonate")
+    smoke_expires = safe_event(parser, "smokegrenade_expired")
+    inferno_starts = safe_event(parser, "inferno_startburn")
+    inferno_expires = safe_event(parser, "inferno_expire")
+    flash_detonates = safe_event(parser, "flashbang_detonate")
+    he_detonates = safe_event(parser, "hegrenade_detonate")
     players = records(parser.parse_player_info())
     snapshots = []
     round_ticks = event_ticks(rounds)
@@ -616,7 +625,7 @@ def analyze(path, filename, preferred_steamid=None):
             primary_player = matching_info.get("player_name") or matching_info.get("name")
     if not primary_player and reference:
         primary_player = reference.get("player")
-    return clean({"file": filename, "primary_player": primary_player, "primary_team": snapshot_teams.get(primary_player), "header": header, "rounds": rounds, "round_starts": round_starts, "round_wins": round_wins, "round_losses": round_losses, "match_result": match_result, "positions": positions, "deaths": deaths, "players": list(by_player.values()), "capabilities": ["kills", "deaths", "assists", "headshots", "opening duels", "trade kills", "KAST", "objectives", "weapon shots", "weapon hits", "damage", "utility damage", "flashes", "rounds", "player roster", "event positions"]})
+    return clean({"file": filename, "primary_player": primary_player, "primary_team": snapshot_teams.get(primary_player), "header": header, "rounds": rounds, "round_starts": round_starts, "round_freeze_ends": round_freeze_ends, "round_wins": round_wins, "round_losses": round_losses, "match_result": match_result, "positions": positions, "deaths": deaths, "blinds": blinds, "shots": shots, "bomb_plants": bomb_plants, "bomb_defuses": bomb_defuses, "bomb_drops": bomb_drops, "bomb_pickups": bomb_pickups, "smoke_detonates": smoke_detonates, "smoke_expires": smoke_expires, "inferno_starts": inferno_starts, "inferno_expires": inferno_expires, "flash_detonates": flash_detonates, "he_detonates": he_detonates, "players": list(by_player.values()), "capabilities": ["kills", "deaths", "assists", "headshots", "opening duels", "trade kills", "KAST", "objectives", "weapon shots", "weapon hits", "damage", "utility damage", "flashes", "rounds", "player roster", "event positions"]})
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -881,6 +890,27 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_POST(self):
         global STEAM_CONFIG
+        if self.path == "/api/library/reanalyze":
+            length = int(self.headers.get("Content-Length", "0"))
+            try:
+                payload = json.loads(self.rfile.read(length))
+                requested = str(payload.get("key") or "").strip()
+                entry = next((item for item in load_library() if requested and (requested == analysis_key(item) or requested in {str(item.get(field) or "") for field in ("match_id", "demo_hash", "stored_file", "file")})), None)
+                stored_file = Path(str(entry.get("stored_file") or "")).name if entry else ""
+                demo = (DEMO_ROOT / stored_file).resolve()
+                if not stored_file or demo.parent != DEMO_ROOT.resolve() or not demo.is_file() or demo.suffix.lower() != ".dem":
+                    self.end_json(404, {"error": "The local demo file was not found."}); return
+                result = analyze(str(demo), stored_file)
+                result["stored_file"] = stored_file
+                for field in ("match_id", "demo_hash"):
+                    if entry.get(field):
+                        result[field] = entry[field]
+                store_analysis(result)
+                self.end_json(200, {"ok": True, "result": result}); return
+            except (ValueError, TypeError, OSError) as exc:
+                self.end_json(400, {"error": f"Could not reanalyze the local demo: {exc}"}); return
+            except Exception as exc:
+                self.end_json(500, {"error": f"Could not reanalyze the local demo: {exc}"}); return
         if self.path == "/api/library/delete":
             length = int(self.headers.get("Content-Length", "0"))
             try:

@@ -74,6 +74,11 @@ class AnalysisTests(unittest.TestCase):
         self.assertGreater(players["Alpha"]["match_rating"], 0)
         self.assertIn("opening duels", result["capabilities"])
         self.assertTrue(result["positions"])
+        self.assertIn("round_freeze_ends", result)
+        self.assertEqual(len(result["shots"]), 2)
+        self.assertIn("bomb_drops", result)
+        self.assertIn("smoke_detonates", result)
+        self.assertIn("blinds", result)
 
     def test_event_ticks_ignores_invalid_values(self):
         self.assertEqual(event_ticks([{"tick": "64"}, {"tick": "bad"}, {"tick": None}]), [64])
