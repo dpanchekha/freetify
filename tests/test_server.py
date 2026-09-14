@@ -11,7 +11,7 @@ TEST_DATA = tempfile.mkdtemp(prefix="freetify-tests-")
 os.environ["XDG_DATA_HOME"] = TEST_DATA
 atexit.register(shutil.rmtree, TEST_DATA, ignore_errors=True)
 
-from server import analyze, event_ticks
+from server import analyze, event_ticks, valid_steam_return
 
 
 class FakeParser:
@@ -65,6 +65,11 @@ class AnalysisTests(unittest.TestCase):
 
     def test_event_ticks_ignores_invalid_values(self):
         self.assertEqual(event_ticks([{"tick": "64"}, {"tick": "bad"}, {"tick": None}]), [64])
+
+    def test_steam_return_accepts_query_and_rejects_other_host(self):
+        expected = "http://127.0.0.1:4321/auth/steam/callback"
+        self.assertTrue(valid_steam_return(expected + "?openid.mode=id_res", expected))
+        self.assertFalse(valid_steam_return("http://evil.example/auth/steam/callback", expected))
 
 
 if __name__ == "__main__":

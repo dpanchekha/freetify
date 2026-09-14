@@ -35,6 +35,25 @@ STEAM_ERROR = None
 STEAM_CALLBACK = ""
 
 
+def valid_steam_return(returned, expected):
+    """Check the OpenID return URL without requiring one exact URL spelling."""
+    try:
+        actual_url = urllib.parse.urlsplit(returned)
+        expected_url = urllib.parse.urlsplit(expected)
+        return bool(
+            actual_url.scheme
+            and actual_url.hostname
+            and actual_url.scheme.lower() == expected_url.scheme.lower()
+            and actual_url.hostname.lower() == expected_url.hostname.lower()
+            and actual_url.port == expected_url.port
+            and actual_url.path == expected_url.path
+            and not actual_url.username
+            and not actual_url.password
+        )
+    except ValueError:
+        return False
+
+
 def steam_demo_dirs():
     if sys.platform == "darwin":
         roots = [Path.home() / "Library/Application Support/Steam"]
@@ -224,27 +243,39 @@ class Handler(SimpleHTTPRequestHandler):
     def do_GET(self):
         global STEAM_SESSION, STEAM_ERROR
         if self.path == "/auth/steam":
+            STEAM_ERROR = None
             realm = STEAM_CALLBACK.rsplit("/auth/", 1)[0] + "/"
             query = urllib.parse.urlencode({"openid.ns": "http://specs.openid.net/auth/2.0", "openid.mode": "checkid_setup", "openid.return_to": STEAM_CALLBACK, "openid.realm": realm, "openid.identity": "http://specs.openid.net/auth/2.0/identifier", "openid.claimed_id": "http://specs.openid.net/auth/2.0/identifier"})
             self.send_response(302); self.send_header("Location", f"https://steamcommunity.com/openid/login?{query}"); self.end_headers(); return
         if self.path.startswith("/auth/steam/callback"):
             params = {key: values[-1] for key, values in urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query).items()}
             claimed = params.get("openid.claimed_id", "")
-            valid_return = params.get("openid.return_to", "") == STEAM_CALLBACK
-            valid_id = re.fullmatch(r"https://steamcommunity\.com/openid/id/[0-9]+", claimed)
+            returned = params.get("openid.return_to", "")
+            valid_return = valid_steam_return(returned, STEAM_CALLBACK)
+            valid_id = re.fullmatch(r"https?://steamcommunity\.com/openid/id/[0-9]+", claimed, re.IGNORECASE)
+            authenticated = False
             if valid_return and valid_id:
                 check_data = urllib.parse.urlencode({**params, "openid.mode": "check_authentication"}).encode()
                 try:
-                    with urllib.request.urlopen("https://steamcommunity.com/openid/login", check_data, timeout=15) as response:
-                        verified = b"is_valid:true" in response.read().replace(b" ", b"")
+                    request = urllib.request.Request(
+                        "https://steamcommunity.com/openid/login",
+                        data=check_data,
+                        headers={"Content-Type": "application/x-www-form-urlencoded", "User-Agent": "Freetify/1.0"},
+                    )
+                    with urllib.request.urlopen(request, timeout=15) as response:
+                        verification = response.read().decode("utf-8", errors="replace")
+                        verified = any(line.strip().lower() == "is_valid:true" for line in verification.splitlines())
                     if verified:
                         STEAM_SESSION = {"steamid": claimed.rsplit("/", 1)[-1]}
                         STEAM_ERROR = None
+                        authenticated = True
+                    else:
+                        STEAM_ERROR = "Steam rejected the sign-in verification."
                 except Exception as exc:
                     STEAM_ERROR = f"Steam verification failed: {exc}"
             else:
-                STEAM_ERROR = "Steam returned an invalid sign-in response."
-            self.send_response(302); self.send_header("Location", "/?steam=connected" if STEAM_SESSION else "/?steam=error"); self.end_headers(); return
+                STEAM_ERROR = "Steam returned an invalid sign-in response (callback or identity mismatch)."
+            self.send_response(302); self.send_header("Location", "/?steam=connected" if authenticated else "/?steam=error"); self.end_headers(); return
         if self.path == "/api/steam":
             self.end_json(200, {"connected": STEAM_SESSION is not None, "sync_ready": bool(STEAM_CONFIG), "error": STEAM_ERROR, **(STEAM_SESSION or {})}); return
         if self.path == "/api/steam/sync":
