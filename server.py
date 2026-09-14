@@ -3,11 +3,15 @@
 import json
 import math
 import os
+import sys
 import tempfile
 import threading
+from pathlib import Path
 from email.parser import BytesParser
 from email.policy import default
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+
+APP_ROOT = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
 
 
 def clean(value):
@@ -58,6 +62,14 @@ def analyze(path, filename):
 
 
 class Handler(SimpleHTTPRequestHandler):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, directory=str(APP_ROOT), **kwargs)
+
+    def do_GET(self):
+        if self.path in ("", "/"):
+            self.path = "/index.html"
+        return super().do_GET()
+
     def end_json(self, status, payload):
         body = json.dumps(payload).encode()
         self.send_response(status)
