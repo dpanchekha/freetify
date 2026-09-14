@@ -4,6 +4,8 @@ import json
 import math
 import os
 import tempfile
+import threading
+import webbrowser
 from email.parser import BytesParser
 from email.policy import default
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -92,4 +94,6 @@ class Handler(SimpleHTTPRequestHandler):
 
 if __name__ == "__main__":
     print("Freetify running at http://127.0.0.1:8000")
-    ThreadingHTTPServer(("127.0.0.1", 8000), Handler).serve_forever()
+    server = ThreadingHTTPServer(("127.0.0.1", 8000), Handler)
+    threading.Timer(1.0, lambda: webbrowser.open("http://127.0.0.1:8000")).start()
+    server.serve_forever()

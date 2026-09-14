@@ -4,18 +4,11 @@ Freetify is a free, local-first CS2 demo analysis app. It reads `.dem` files on 
 
 ## Windows installation
 
-1. Download the project: on GitHub, click **Code → Download ZIP**, then extract it to a folder such as `Documents\Freetify`.
-2. Install [Python 3 for Windows](https://www.python.org/downloads/windows/) if needed. During setup, enable **Add Python to PATH**.
-3. In the extracted Freetify folder, right-click `install-windows.ps1` and choose **Run with PowerShell**.
-4. Use the new **Freetify** shortcut on your desktop to start the app.
+The intended user experience is a normal installer: download `FreetifySetup.exe`, run it, and click **Install**. It creates a desktop shortcut and bundles the runtime, so users do not need Python, PowerShell, a ZIP extraction step, or a terminal.
 
-If Windows blocks the script, open PowerShell in the Freetify folder and run:
+The Windows installer is built automatically by GitHub Actions. To create one, push a version tag such as `v1.0.0`, or run the **Build Windows installer** workflow manually from the repository’s Actions tab. Download `FreetifySetup.exe` from the workflow artifact or a GitHub Release.
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\install-windows.ps1
-```
-
-The installer creates a local `.venv`, installs the CS2 demo parser, creates a desktop shortcut, and starts the local server at `http://127.0.0.1:8000`.
+For developer setup, the repository also includes `install-windows.ps1` and `start-freetify.bat`.
 
 ## Using Freetify
 
@@ -36,6 +29,6 @@ Not yet implemented:
 - 2D demo viewer or playback
 - Detailed match display pages
 - Positioning, aim, utility, economy, or coaching analysis
-- A signed standalone `.exe` installer
+- A signed installer (the generated installer is currently unsigned, so Windows SmartScreen may show a warning)
 
 The parser is powered by [`demoparser2`](https://github.com/RPSam/demoparser2). Freetify is currently a functional local analysis foundation, not a complete Leetify replacement.
