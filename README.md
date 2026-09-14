@@ -1,6 +1,6 @@
 # Freetify
 
-Freetify is a free, local-first desktop CS2 demo analysis app. It reads `.dem` files on your own computer and provides a lightweight Leetify-style dashboard. No account or cloud upload is required.
+Freetify is a free, local-first desktop CS2 demo analysis app. It reads `.dem` files on your own computer or from your Steam account and provides a lightweight Leetify-style dashboard. No account or cloud upload is required.
 
 ## Why Freetify?
 
