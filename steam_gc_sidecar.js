@@ -14,6 +14,7 @@ let cs2 = null;
 let loginSession = null;
 let state = 'disconnected';
 let steamid = null;
+let connectionTimer = null;
 // Steam defaults client logons to ID 0. A unique nonzero ID prevents this
 // helper from replacing the desktop Steam client on the same network.
 const logonID = Math.floor(Math.random() * 0xffffffff) || 1;
@@ -35,14 +36,17 @@ function setState(next, detail = '') {
 
 function publicError(error, context = 'Steam connection failed') {
   const message = error && error.message ? error.message : String(error || 'Unknown error');
-  if (/LoggedInElsewhere|AlreadyLoggedInElsewhere/i.test(message)) {
-    setState('error', 'Steam will not let Freetify use CS2 Game Coordinator while this account is active in another Steam game-client session. This connection method cannot share a live CS2 session.');
+  if (/LogonSessionReplaced|LoggedInElsewhere|AlreadyLoggedInElsewhere/i.test(message)) {
+    closeClient();
+    setState('error', 'Steam replaced Freetify’s CS2 connection. Click Connect CS2 and approve a fresh QR sign-in. If it repeats, close any other Freetify window and fully exit CS2 before reconnecting.');
     return;
   }
   setState('error', `${context}: ${message}`);
 }
 
 function closeClient() {
+  if (connectionTimer) clearTimeout(connectionTimer);
+  connectionTimer = null;
   if (client) {
     try { client.logOff(); } catch (_) {}
   }
@@ -55,6 +59,13 @@ function startClient(refreshToken) {
   setState('connecting', 'Connecting to Steam and CS2…');
   client = new SteamUser({autoRelogin: true, renewRefreshTokens: true});
   cs2 = new NodeCS2(client);
+  const connectingClient = client;
+  connectionTimer = setTimeout(() => {
+    if (client === connectingClient && (state === 'connecting' || state === 'connecting_gc')) {
+      closeClient();
+      setState('error', 'CS2 did not finish connecting in time. Click Connect CS2 to try a fresh QR sign-in.');
+    }
+  }, 12000);
 
   client.on('error', error => publicError(error, 'Steam client error'));
   client.on('loggedOn', () => {
@@ -65,8 +76,8 @@ function startClient(refreshToken) {
   });
   client.on('refreshToken', token => send('refresh_token', {refresh_token: token}));
   cs2.on('error', error => publicError(error, 'CS2 Game Coordinator error'));
-  cs2.on('connectedToGC', () => setState('ready', 'CS2 match history is ready.'));
-  cs2.on('disconnectedFromGC', () => setState('connecting_gc', 'CS2 connection was interrupted; retrying…'));
+  cs2.on('connectedToGC', () => { if (connectionTimer) clearTimeout(connectionTimer); connectionTimer = null; setState('ready', 'CS2 match history is ready.'); });
+  cs2.on('disconnectedFromGC', () => { if (client && cs2 && state !== 'error') setState('connecting_gc', 'CS2 connection was interrupted; retrying…'); });
   cs2.on('matchList', matches => send('matches', {matches}));
 
   try {
@@ -77,6 +88,9 @@ function startClient(refreshToken) {
 }
 
 async function startQr() {
+  // A new QR login is an explicit recovery action. Tear down any stalled
+  // refresh-token session first so it cannot keep the UI in "connecting".
+  closeClient();
   if (loginSession) {
     try { loginSession.cancelLoginAttempt(); } catch (_) {}
   }

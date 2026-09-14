@@ -29,6 +29,13 @@ class FakeParser:
             "player_hurt": [{"tick": 48, "attacker_name": "Alpha", "dmg_health": 42, "weapon": "hegrenade"}],
             "player_blind": [{"tick": 32, "attacker_name": "Charlie"}],
             "weapon_fire": [{"tick": 47, "user_name": "Alpha", "weapon": "ak47"}, {"tick": 48, "user_name": "Alpha", "weapon": "ak47"}],
+            "smokegrenade_detonate": [{"tick": 50, "entityid": 12, "user_name": "Alpha", "x": 120, "y": 240}],
+            "smokegrenade_expired": [{"tick": 1100, "entityid": 12}],
+            "inferno_startburn": [{"tick": 55, "entityid": 13, "user_name": "Bravo", "x": 130, "y": 250}],
+            "inferno_expire": [{"tick": 500, "entityid": 13}],
+            "flashbang_detonate": [{"tick": 60, "user_name": "Charlie", "x": 140, "y": 260}],
+            "hegrenade_detonate": [{"tick": 65, "user_name": "Alpha", "x": 150, "y": 270}],
+            "decoy_started": [{"tick": 70, "user_name": "Bravo", "x": 160, "y": 280}],
             "round_end": [{"tick": 96, "winner": "CT"}],
         }.get(name, [])
 
@@ -66,12 +73,15 @@ class AnalysisTests(unittest.TestCase):
         self.assertEqual(players["Charlie"]["assists"], 1)
         self.assertEqual(players["Alpha"]["utility_damage"], 42)
         self.assertEqual(players["Alpha"]["adr"], 42.0)
-        self.assertEqual(players["Alpha"]["impact_score"], 42.0)
+        self.assertEqual(players["Alpha"]["damage_impact"], 42.0)
+        self.assertEqual(players["Alpha"]["impact_score"], 2.44)
         self.assertEqual(players["Alpha"]["accuracy"], 50.0)
         self.assertGreater(players["Alpha"]["aim_rating"], 0)
         self.assertGreaterEqual(players["Alpha"]["utility_rating"], 0)
         self.assertGreater(players["Alpha"]["impact"], 0)
         self.assertGreater(players["Alpha"]["match_rating"], 0)
+        self.assertEqual(players["Alpha"]["rating"], players["Alpha"]["impact_score"])
+        self.assertEqual(players["Alpha"]["rating"], players["Alpha"]["match_rating"])
         self.assertIn("opening duels", result["capabilities"])
         self.assertTrue(result["positions"])
         self.assertIn("round_freeze_ends", result)
@@ -79,6 +89,11 @@ class AnalysisTests(unittest.TestCase):
         self.assertIn("bomb_drops", result)
         self.assertIn("smoke_detonates", result)
         self.assertIn("blinds", result)
+        self.assertEqual(result["smoke_detonates"][0]["x"], 120)
+        self.assertEqual(result["inferno_starts"][0]["entityid"], 13)
+        self.assertEqual(result["flash_detonates"][0]["tick"], 60)
+        self.assertEqual(result["he_detonates"][0]["y"], 270)
+        self.assertEqual(result["decoys"][0]["tick"], 70)
 
     def test_event_ticks_ignores_invalid_values(self):
         self.assertEqual(event_ticks([{"tick": "64"}, {"tick": "bad"}, {"tick": None}]), [64])

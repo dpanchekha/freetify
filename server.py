@@ -151,6 +151,44 @@ def store_analysis(result):
                 pass
 
 
+def update_gc_match_times(matches):
+    """Backfill the actual CS2 match time for locally saved GC downloads."""
+    times = {}
+    for match in matches if isinstance(matches, list) else []:
+        if not isinstance(match, dict):
+            continue
+        match_id = str(match.get("matchid") or match.get("match_id") or match.get("id") or "").strip()
+        try:
+            match_time = int(float(match.get("matchtime")) * 1000)
+        except (TypeError, ValueError):
+            continue
+        if match_id and 946684800000 <= match_time <= 4102444800000:
+            times[match_id] = match_time
+    if not times:
+        return
+    with LIBRARY_LOCK:
+        library, changed = load_library(), False
+        for summary in library:
+            match_time = times.get(str(summary.get("match_id") or ""))
+            if not match_time or summary.get("match_time") == match_time:
+                continue
+            summary["match_time"] = match_time
+            report_file = Path(str(summary.get("report_file") or "")).name
+            if report_file:
+                try:
+                    report_path = REPORT_ROOT / report_file
+                    report = json.loads(report_path.read_text(encoding="utf-8"))
+                    report["match_time"] = match_time
+                    report_path.write_text(json.dumps(report), encoding="utf-8")
+                except (OSError, ValueError, TypeError):
+                    pass
+            changed = True
+        if changed:
+            temporary = LIBRARY_FILE.with_suffix(".tmp")
+            temporary.write_text(json.dumps(library[:100]), encoding="utf-8")
+            os.replace(temporary, LIBRARY_FILE)
+
+
 def analysis_key(result):
     """Stable identity: a Steam match id wins, then content hash, then filename."""
     if not isinstance(result, dict):
@@ -172,7 +210,7 @@ def demo_digest(path):
 
 def analysis_summary(result):
     """Small download response; the full report remains in the local library."""
-    fields = ("file", "stored_file", "match_id", "demo_hash", "saved_at", "primary_player", "primary_team", "header", "round_wins", "round_losses", "match_result", "players", "rounds", "report_file", "value")
+    fields = ("file", "stored_file", "match_id", "demo_hash", "match_time", "saved_at", "metric_model", "primary_player", "primary_team", "header", "round_wins", "round_losses", "match_result", "players", "rounds", "report_file", "value")
     summary = {field: result.get(field) for field in fields if field in result}
     summary["summary_only"] = True
     return clean(summary)
@@ -252,6 +290,7 @@ class SteamGameCoordinator:
                 self.qr_image = event.get("image")
             elif event_type == "matches":
                 self.matches = event.get("matches") or []
+                update_gc_match_times(self.matches)
                 self.state = "ready"
                 self.detail = f"Found {len(self.matches)} recent CS2 match{'es' if len(self.matches) != 1 else ''}."
             elif event_type == "refresh_token":
@@ -442,6 +481,7 @@ def analyze(path, filename, preferred_steamid=None):
     inferno_expires = safe_event(parser, "inferno_expire")
     flash_detonates = safe_event(parser, "flashbang_detonate")
     he_detonates = safe_event(parser, "hegrenade_detonate")
+    decoys = safe_event(parser, "decoy_started")
     players = records(parser.parse_player_info())
     snapshots = []
     round_ticks = event_ticks(rounds)
@@ -601,11 +641,11 @@ def analyze(path, filename, preferred_steamid=None):
         player["kd"] = round(player["kills"] / max(player["deaths"], 1), 2)
         player["headshot_rate"] = round(player["headshots"] / max(player["kills"], 1) * 100, 1)
         player["adr"] = round(player.get("damage", 0) / rounds_seen, 2)
-        player["impact_score"] = round(player["kd"] * player["adr"], 2)
         player["shots"] = player.get("shots", 0)
         player["hits"] = player.get("hits", 0)
         player["accuracy"] = round(player["hits"] / max(player["shots"], 1) * 100, 1) if player["shots"] else None
-        # These are transparent event-derived indicators, not a proprietary aim model.
+        # Legacy compatibility fields. The UI presents the raw measurements
+        # rather than treating these convenience blends as skill ratings.
         accuracy_component = (player["accuracy"] or 0) / 100
         headshot_component = player["headshot_rate"] / 100
         player["aim_rating"] = round(100 * (0.65 * accuracy_component + 0.35 * headshot_component), 1)
@@ -615,8 +655,15 @@ def analyze(path, filename, preferred_steamid=None):
         player["kast"] = round((player["kills"] + player["assists"] + (rounds_seen - player["deaths"])) / max(rounds_seen, 1) * 100, 1)
         player["opening_diff"] = player["opening_kills"] - player["opening_deaths"]
         player["trade_diff"] = player["trade_kills"] - player["trade_deaths"]
-        player["match_rating"] = round(max(0, min(100, 45 + min(player["kd"], 3) * 7 + min(player["adr"], 120) * 0.08 + player["headshot_rate"] * 0.04 + player["utility_rating"] * 0.08 + player["opening_diff"] * 2 + player["trade_diff"] * 1.5 + player["objective_events"] * 1.5 + (5 if match_result == "WIN" else -5 if match_result == "LOSS" else 0))), 1)
-        # Keep the legacy field for saved UI data, but make it the exact score.
+        # A deliberately transparent combat-output measure, kept separate from
+        # the broader event-based rating below.
+        player["damage_impact"] = round(player["kd"] * player["adr"], 2)
+        player["impact_score"] = round((player["kills"] + 0.5 * player["assists"] + player.get("damage", 0) / 100 + 0.6 * player["opening_kills"] + 0.4 * player["trade_kills"] + player.get("utility_damage", 0) / 100 + 0.15 * player.get("flashes", 0) + 0.8 * player["objective_events"]) / rounds_seen, 2)
+    for player in by_player.values():
+        # Rating is the raw holistic event score per round, not a fabricated
+        # 0–100 rank. Scoreboards sort players by this number.
+        player["rating"] = player["impact_score"]
+        player["match_rating"] = player["rating"]  # Backward-compatible saved reports.
         player["impact"] = player["impact_score"]
     primary_player = None
     if preferred_steamid:
@@ -625,7 +672,7 @@ def analyze(path, filename, preferred_steamid=None):
             primary_player = matching_info.get("player_name") or matching_info.get("name")
     if not primary_player and reference:
         primary_player = reference.get("player")
-    return clean({"file": filename, "primary_player": primary_player, "primary_team": snapshot_teams.get(primary_player), "header": header, "rounds": rounds, "round_starts": round_starts, "round_freeze_ends": round_freeze_ends, "round_wins": round_wins, "round_losses": round_losses, "match_result": match_result, "positions": positions, "deaths": deaths, "blinds": blinds, "shots": shots, "bomb_plants": bomb_plants, "bomb_defuses": bomb_defuses, "bomb_drops": bomb_drops, "bomb_pickups": bomb_pickups, "smoke_detonates": smoke_detonates, "smoke_expires": smoke_expires, "inferno_starts": inferno_starts, "inferno_expires": inferno_expires, "flash_detonates": flash_detonates, "he_detonates": he_detonates, "players": list(by_player.values()), "capabilities": ["kills", "deaths", "assists", "headshots", "opening duels", "trade kills", "KAST", "objectives", "weapon shots", "weapon hits", "damage", "utility damage", "flashes", "rounds", "player roster", "event positions"]})
+    return clean({"file": filename, "metric_model": "event-impact-v2", "primary_player": primary_player, "primary_team": snapshot_teams.get(primary_player), "header": header, "rounds": rounds, "round_starts": round_starts, "round_freeze_ends": round_freeze_ends, "round_wins": round_wins, "round_losses": round_losses, "match_result": match_result, "positions": positions, "deaths": deaths, "blinds": blinds, "shots": shots, "bomb_plants": bomb_plants, "bomb_defuses": bomb_defuses, "bomb_drops": bomb_drops, "bomb_pickups": bomb_pickups, "smoke_detonates": smoke_detonates, "smoke_expires": smoke_expires, "inferno_starts": inferno_starts, "inferno_expires": inferno_expires, "flash_detonates": flash_detonates, "he_detonates": he_detonates, "decoys": decoys, "players": list(by_player.values()), "capabilities": ["kills", "deaths", "assists", "headshots", "opening duels", "trade kills", "KAST", "objectives", "weapon shots", "weapon hits", "damage", "utility damage", "flashes", "rounds", "player roster", "event positions"]})
 
 
 class Handler(SimpleHTTPRequestHandler):
@@ -793,7 +840,7 @@ class Handler(SimpleHTTPRequestHandler):
         steamid = urllib.parse.quote(str(STEAM_SESSION["steamid"]), safe="")
         return open_uri(f"https://steamcommunity.com/profiles/{steamid}/gcpd/730?tab=matchmaking")
 
-    def download_gc_replay(self, replay_url, match_id="", progress=None):
+    def download_gc_replay(self, replay_url, match_id="", match_time=None, progress=None):
         """Download a Valve replay URL returned by the authenticated CS2 GC."""
         parsed = urllib.parse.urlsplit(str(replay_url))
         if (
@@ -838,6 +885,12 @@ class Handler(SimpleHTTPRequestHandler):
             result["stored"] = True
             result["stored_file"] = destination.name
             result["match_id"] = str(match_id or "")
+            try:
+                timestamp = int(match_time)
+                if 946684800000 <= timestamp <= 4102444800000:
+                    result["match_time"] = timestamp
+            except (TypeError, ValueError):
+                pass
             result["demo_hash"] = demo_digest(destination)
             if progress:
                 progress("Saving local match report…")
@@ -869,7 +922,7 @@ class Handler(SimpleHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def start_download_job(self, replay_url, match_id):
+    def start_download_job(self, replay_url, match_id, match_time=None):
         job_id = uuid.uuid4().hex
         with DOWNLOAD_JOBS_LOCK:
             DOWNLOAD_JOBS[job_id] = {"state": "queued", "detail": "Queued for local download…"}
@@ -878,7 +931,7 @@ class Handler(SimpleHTTPRequestHandler):
                 DOWNLOAD_JOBS[job_id].update({"state": "working", "detail": detail})
         def run():
             try:
-                result = self.download_gc_replay(replay_url, match_id, update)
+                result = self.download_gc_replay(replay_url, match_id, match_time, update)
                 with DOWNLOAD_JOBS_LOCK:
                     DOWNLOAD_JOBS[job_id].update({"state": "complete", "detail": "Downloaded and analyzed.", "result": analysis_summary(result)})
             except Exception as exc:
@@ -902,7 +955,7 @@ class Handler(SimpleHTTPRequestHandler):
                     self.end_json(404, {"error": "The local demo file was not found."}); return
                 result = analyze(str(demo), stored_file)
                 result["stored_file"] = stored_file
-                for field in ("match_id", "demo_hash"):
+                for field in ("match_id", "demo_hash", "match_time"):
                     if entry.get(field):
                         result[field] = entry[field]
                 store_analysis(result)
@@ -960,7 +1013,7 @@ class Handler(SimpleHTTPRequestHandler):
             length = int(self.headers.get("Content-Length", "0"))
             try:
                 payload = json.loads(self.rfile.read(length))
-                job = self.start_download_job(payload.get("replay_url", ""), payload.get("match_id", ""))
+                job = self.start_download_job(payload.get("replay_url", ""), payload.get("match_id", ""), payload.get("match_time"))
                 self.end_json(202, {"ok": True, "job": job, "detail": "Queued for local download…"}); return
             except (ValueError, TypeError) as exc:
                 self.end_json(400, {"error": f"Could not start this CS2 replay download: {exc}"}); return

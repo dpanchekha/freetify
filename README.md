@@ -62,3 +62,7 @@ Not yet implemented:
 - Automatic replay-download URLs from every returned CS2 match (CS2 availability varies and this is still being wired into the local demo library)
 
 The parser is powered by [`LaihoE/demoparser`](https://github.com/LaihoE/demoparser) through its `demoparser2` Python package. Freetify is a functional native desktop analysis app with local match reports and a lightweight event viewer; it is not yet a complete Leetify replacement.
+
+## Credits
+
+- CS2 weapon silhouettes are Valve game assets, sourced from the game-extracted [Juknum/counter-strike-icons](https://github.com/Juknum/counter-strike-icons) archive.
