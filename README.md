@@ -4,7 +4,7 @@ Freetify is a free, local-first CS2 demo analysis app. It reads `.dem` files on 
 
 ## Windows installation
 
-The intended user experience is a normal installer: download `FreetifySetup.exe`, run it, and click **Install**. It creates a desktop shortcut and bundles the runtime, so users do not need Python, PowerShell, a ZIP extraction step, or a terminal.
+The intended user experience is a normal desktop app: download `FreetifySetup.exe`, run it, and click **Install**. It creates a desktop shortcut and bundles the runtime, so users do not need Python, PowerShell, a ZIP extraction step, a terminal, or a separate browser. Freetify opens in its own application window.
 
 The Windows installer is built automatically by GitHub Actions. To create a Release, push a version tag such as `v1.0.0`:
 

@@ -22,7 +22,7 @@ jobs:
         shell: pwsh
         run: >-
           pyinstaller --noconfirm --clean --onedir --name Freetify
-          --collect-all demoparser2
+          --collect-all demoparser2 --collect-all webview
           --add-data "index.html;."
           --add-data "app.js;."
           --add-data "styles.css;."

@@ -5,7 +5,6 @@ import math
 import os
 import tempfile
 import threading
-import webbrowser
 from email.parser import BytesParser
 from email.policy import default
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -93,7 +92,18 @@ class Handler(SimpleHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    print("Freetify running at http://127.0.0.1:8000")
     server = ThreadingHTTPServer(("127.0.0.1", 8000), Handler)
-    threading.Timer(1.0, lambda: webbrowser.open("http://127.0.0.1:8000")).start()
-    server.serve_forever()
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        import webview
+        print("Freetify desktop app running")
+        webview.create_window("Freetify — CS2 Demo Insights", "http://127.0.0.1:8000", width=1440, height=950, min_size=(900, 650))
+        webview.start()
+    except ImportError:
+        import webbrowser
+        print("Freetify running at http://127.0.0.1:8000")
+        webbrowser.open("http://127.0.0.1:8000")
+        try:
+            server.serve_forever()
+        except KeyboardInterrupt:
+            pass
