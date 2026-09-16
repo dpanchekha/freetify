@@ -499,10 +499,8 @@ def analyze(path, filename, preferred_steamid=None):
             max_tick = 0
     if max_tick:
         try:
-            # A demo used to be reduced to roughly 240 snapshots.  That was
-            # enough for a static heatmap but made the playback appear to jump
-            # between locations. Keep up to ~30,000 real game snapshots; this
-            # gives long 64-tick matches roughly 20 position updates/sec.
+            # Keep up to ~30,000 real game snapshots; this gives long 64-tick
+            # matches roughly 20 position updates/sec.
             sample_step = max(2, max_tick // 30000)
             sample_ticks = list(range(0, max_tick + 1, sample_step))
             positions = records(parser.parse_ticks(["X", "Y", "yaw", "health", "armor_value", "helmet", "has_defuser", "has_bomb", "active_weapon_name", "player_name", "team_num", "game_time"], ticks=sample_ticks))
@@ -568,7 +566,8 @@ def analyze(path, filename, preferred_steamid=None):
     def round_number(tick):
         return sum(1 for start in start_ticks if start <= tick) if start_ticks else 1
     opening_rounds = set()
-    for death in sorted(deaths, key=lambda event: int(event.get("tick") or 0)):
+    sorted_deaths = sorted(deaths, key=lambda event: int(event.get("tick") or 0))
+    for death in sorted_deaths:
         try:
             death_tick = int(death.get("tick") or 0)
         except (TypeError, ValueError):
@@ -582,14 +581,14 @@ def analyze(path, filename, preferred_steamid=None):
             if victim in by_player:
                 by_player[victim]["opening_deaths"] += 1
             opening_rounds.add(current_round)
-    for index, death in enumerate(sorted(deaths, key=lambda event: int(event.get("tick") or 0))):
+    for index, death in enumerate(sorted_deaths):
         try:
             death_tick = int(death.get("tick") or 0)
         except (TypeError, ValueError):
             continue
         attacker = death.get("attacker_name") or death.get("attacker")
         victim = death.get("user_name") or death.get("victim_name")
-        for previous in sorted(deaths, key=lambda event: int(event.get("tick") or 0))[:index][::-1]:
+        for previous in sorted_deaths[:index][::-1]:
             try:
                 previous_tick = int(previous.get("tick") or 0)
             except (TypeError, ValueError):
