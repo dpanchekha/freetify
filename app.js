@@ -44,11 +44,17 @@ function renderMeasurements() {
     if (key === 'dpr') return deaths / rounds;
     if (key === 'adr') return (Number(player.damage) || 0) / rounds;
     if (key === 'hs') return (Number(player.headshots) || 0) / Math.max(kills, 1) * 100;
+    if (key === 'accuracy') return player.accuracy == null ? NaN : Number(player.accuracy);
+    if (key === 'aim') return Number(player.aim_rating);
+    if (key === 'utility') return Number(player.utility_rating);
+    if (key === 'opening') return (Number(player.opening_kills) || 0) - (Number(player.opening_deaths) || 0);
+    if (key === 'trade') return (Number(player.trade_kills) || 0) - (Number(player.trade_deaths) || 0);
+    if (key === 'kast') return Number(player.kast);
     return damageImpact(player);
   };
   const rounds = entries.reduce((sum, entry) => sum + roundCount(entry.result), 0), total = key => entries.reduce((sum, entry) => sum + (Number(entry.player[key]) || 0), 0), average = fn => entries.reduce((sum, entry) => sum + fn(entry), 0) / entries.length;
   const wins = entries.filter(entry => entry.result.match_result === 'WIN').length, losses = entries.filter(entry => entry.result.match_result === 'LOSS').length;
-  const rating = average(entry => ratingValue(entry.player)), kd = total('kills') / Math.max(total('deaths'), 1), kpr = total('kills') / rounds, dpr = total('deaths') / rounds, adr = total('damage') / rounds, hs = total('headshots') / Math.max(total('kills'), 1) * 100, dmgImpact = average(entry => damageImpact(entry.player));
+  const rating = average(entry => ratingValue(entry.player)), kd = total('kills') / Math.max(total('deaths'), 1), kpr = total('kills') / rounds, dpr = total('deaths') / rounds, adr = total('damage') / rounds, hs = total('headshots') / Math.max(total('kills'), 1) * 100, accuracy = total('shots') ? total('hits') / total('shots') * 100 : NaN, aim = average(entry => Number(entry.player.aim_rating) || 0), utility = average(entry => Number(entry.player.utility_rating) || 0), opening = total('opening_kills') - total('opening_deaths'), trade = total('trade_kills') - total('trade_deaths'), kast = (total('kills') + total('assists') + rounds - total('deaths')) / rounds * 100, dmgImpact = average(entry => damageImpact(entry.player));
   const playerSamples = analyses.flatMap(result => (result.players || []).map(player => ({player, result}))).filter(entry => entry.player);
   const benchmark = key => playerSamples.map(entry => metricValue(entry.player, entry.result, key)).filter(Number.isFinite);
   const ratingSamples = benchmark('rating');
@@ -63,6 +69,12 @@ function renderMeasurements() {
     {label:'Deaths / round', value:dpr.toFixed(2), raw:dpr, key:'dpr'},
     {label:'ADR', value:adr.toFixed(1), raw:adr, key:'adr'},
     {label:'HS kill %', value:`${hs.toFixed(0)}%`, raw:hs, key:'hs'},
+    {label:'Accuracy', value:total('shots') ? `${accuracy.toFixed(1)}%` : '—', raw:accuracy, key:'accuracy'},
+    {label:'Aim', value:aim.toFixed(1), raw:aim, key:'aim'},
+    {label:'Utility', value:utility.toFixed(1), raw:utility, key:'utility'},
+    {label:'Opening diff', value:opening > 0 ? `+${opening}` : `${opening}`, raw:opening, key:'opening'},
+    {label:'Trade diff', value:trade > 0 ? `+${trade}` : `${trade}`, raw:trade, key:'trade'},
+    {label:'KAST-style', value:`${kast.toFixed(1)}%`, raw:kast, key:'kast'},
     {label:'Damage Impact', value:dmgImpact.toFixed(1), raw:dmgImpact, key:'impact'}
   ];
   const comparison = ratingSamples.length > 1 ? `Higher than ${ratingPercentile}% of ${ratingSamples.length} player-match performances in your analyzed games` : 'Analyze more matches to build a local comparison';
@@ -76,7 +88,7 @@ migrateLegacyLibrary().finally(restoreLibrary);
 window.addEventListener('pagehide', () => localStorage.removeItem('freetify-analyses'));
 function renderRatingChart() { const stats = document.querySelector('.stat-grid'); if (!stats) return; let card = document.querySelector('#rating-trend-card'); if (!card) { card = document.createElement('article'); card.id = 'rating-trend-card'; card.className = 'viewer-card'; card.innerHTML = '<div class="section-heading"><h3>Freetify Rating trend</h3><span class="viewer-position">rating / round</span></div><canvas id="rating-trend-chart" width="900" height="180"></canvas>'; stats.after(card); } const canvas = document.querySelector('#rating-trend-chart'); if (!canvas) return; const values = analyses.slice(0, 12).reverse().map(item => { const player = (item.players || []).find(candidate => candidate.player === item.primary_player) || (item.players || [])[0]; return ratingValue(player); }).filter(Number.isFinite); const ctx = canvas.getContext('2d'); ctx.fillStyle = '#20231f'; ctx.fillRect(0, 0, canvas.width, canvas.height); if (!values.length) { ctx.fillStyle = '#aeb5aa'; ctx.font = '14px Manrope, Arial'; ctx.textAlign = 'center'; ctx.fillText('Analyze demos to build a rating trend', canvas.width / 2, canvas.height / 2); return; } const min = Math.min(...values), max = Math.max(...values), xStep = (canvas.width - 70) / Math.max(values.length - 1, 1); ctx.strokeStyle = '#39412f'; ctx.lineWidth = 1; for (let y = 25; y < canvas.height - 20; y += 35) { ctx.beginPath(); ctx.moveTo(35, y); ctx.lineTo(canvas.width - 25, y); ctx.stroke(); } ctx.strokeStyle = '#a8d95a'; ctx.lineWidth = 3; ctx.beginPath(); values.forEach((value, index) => { const x = 35 + index * xStep, y = canvas.height - 25 - ((value - min) / Math.max(max - min, .01)) * (canvas.height - 55); index ? ctx.lineTo(x, y) : ctx.moveTo(x, y); }); ctx.stroke(); values.forEach((value, index) => { const x = 35 + index * xStep, y = canvas.height - 25 - ((value - min) / Math.max(max - min, .01)) * (canvas.height - 55); ctx.fillStyle = '#a8d95a'; ctx.beginPath(); ctx.arc(x, y, 5, 0, Math.PI * 2); ctx.fill(); }); }
 renderRatingChart(); new MutationObserver(renderRatingChart).observe(document.querySelector('#recent-matches'), { childList: true });
-const views = { dashboard: ['PERSONAL ANALYTICS', 'Overview'], matches: ['MATCH HISTORY', 'Matches'], measurements: ['PERFORMANCE REFERENCE', 'Stats'], methodology: ['TRANSPARENT METRICS', 'Methodology'], settings: ['PREFERENCES', 'Settings'], detail: ['MATCH ANALYSIS', 'Match details'] };
+const views = { dashboard: ['PERSONAL ANALYTICS', 'Overview'], matches: ['MATCH HISTORY', 'Matches'], 'add-matches': ['MATCH IMPORT', 'Add matches'], measurements: ['PERFORMANCE REFERENCE', 'Stats'], methodology: ['TRANSPARENT METRICS', 'Methodology'], settings: ['PREFERENCES', 'Settings'], detail: ['MATCH ANALYSIS', 'Match details'] };
 function showView(name) { const safe = views[name] ? name : 'dashboard'; document.querySelectorAll('.view').forEach(v => v.classList.remove('active-view')); document.querySelector(`#${safe}-view`).classList.add('active-view'); document.querySelectorAll('.nav-link').forEach(a => a.classList.toggle('active', a.dataset.view === safe)); document.querySelector('#page-kicker').textContent = views[safe][0]; document.querySelector('#page-title').textContent = views[safe][1]; history.replaceState(null, '', `#${safe}`); }
 document.querySelectorAll('[data-view]').forEach(a => a.addEventListener('click', e => { e.preventDefault(); showView(a.dataset.view); })); showView(location.hash.slice(1) || 'dashboard');
 const steamResult = new URLSearchParams(location.search).get('steam');
@@ -410,3 +422,58 @@ if (analyses.length && location.protocol !== 'file:') setTimeout(scanInstalled, 
 const input = document.querySelector('#folder-input'), path = document.querySelector('#folder-path'); document.querySelector('#choose-folder').onclick = () => input.click(); input.addEventListener('change', () => { selectedFiles = [...input.files]; if (!selectedFiles.length) return; const first = selectedFiles[0]; const parts = first.webkitRelativePath.split('/'); parts.pop(); const chosen = parts.join(' / '); path.textContent = chosen || first.name; localStorage.setItem('freetify-folder', chosen); document.querySelector('#saved-note').textContent = `${selectedFiles.filter(file => file.name.toLowerCase().endsWith('.dem')).length} demos ready to analyze`; notify('Folder selected — press Scan for new demos'); });
 const stored = localStorage.getItem('freetify-folder'); if (stored) path.textContent = stored;
 if ('serviceWorker' in navigator && location.protocol !== 'file:') navigator.serviceWorker.register('./sw.js');
+
+const utilityMethod = [...document.querySelectorAll('.method-card')].find(card => card.querySelector('h3')?.textContent.trim().startsWith('Utility'));
+if (utilityMethod) {
+  utilityMethod.querySelector('code').textContent = 'min(100, 100 × (0.5 × min((UtilDmg/R)/20, 1) + 0.2 × min((EF/R)/1.5, 1) + 0.3 × min((SmokeSec/R)/12, 1)))';
+  const explanation = utilityMethod.querySelectorAll('p')[0];
+  if (explanation) explanation.textContent = 'A capped mix of utility damage, enemies flashed, and effective smoke seconds per round. The 50/20/30 weighting rewards damage, flashes, and useful smoke presence without letting any one category dominate.';
+}
+
+// Match sources live together in Add matches; Settings is reserved for
+// persistent app preferences such as the automatic demo-folder location.
+const addMatchesView = document.querySelector('#add-matches-view');
+['.steam-card', '.steam-sync-card', '.steam-gc-card'].forEach(selector => {
+  const card = document.querySelector(selector);
+  if (card) addMatchesView.append(card);
+});
+if (steamResult) showView('add-matches');
+
+const demoUpload = document.querySelector('#demo-upload');
+const analyzeUpload = document.querySelector('#analyze-upload');
+const uploadStatus = document.querySelector('#upload-status');
+demoUpload.addEventListener('change', () => {
+  const count = [...demoUpload.files].filter(file => file.name.toLowerCase().endsWith('.dem')).length;
+  analyzeUpload.disabled = !count;
+  uploadStatus.textContent = count ? `${count} demo${count === 1 ? '' : 's'} selected` : 'No .dem files selected';
+});
+analyzeUpload.onclick = async () => {
+  const demos = [...demoUpload.files].filter(file => file.name.toLowerCase().endsWith('.dem'));
+  if (!demos.length) return;
+  analyzeUpload.disabled = true;
+  uploadStatus.textContent = `Analyzing ${demos.length} demo${demos.length === 1 ? '' : 's'} locally…`;
+  const form = new FormData();
+  demos.forEach(file => form.append('demos', file, file.name));
+  try {
+    const response = await fetch('/api/analyze', {method: 'POST', body: form});
+    const payload = await response.json();
+    const good = (payload.results || []).filter(result => !result.error);
+    good.forEach(result => {
+      const player = result.players.find(candidate => candidate.player === result.primary_player) || [...result.players].sort((a, b) => b.kills - a.kills)[0];
+      if (!player) return;
+      const header = result.header || {}, map = header.map_name || header.map || 'Unknown';
+      matches.unshift([map, 'Parsed demo', result.match_result || 'ANALYZED', `${result.round_wins || 0} : ${result.round_losses || 0}`, `${player.match_rating ?? player.kd}`, `${player.kills} / ${player.deaths}`, 'Just now']);
+      analyses = analyses.map(item => ({...item, matchIndex: item.matchIndex + 1}));
+      analyses.unshift({...result, matchIndex: 0});
+    });
+    localStorage.setItem('freetify-matches', JSON.stringify(matches.slice(0, 50)));
+    localStorage.setItem('freetify-analyses', JSON.stringify(analyses.slice(0, 50)));
+    renderMatches();
+    uploadStatus.textContent = `${good.length} demo${good.length === 1 ? '' : 's'} analyzed and added`;
+    demoUpload.value = '';
+  } catch (_) {
+    uploadStatus.textContent = 'Analyzer unavailable — start Freetify and try again';
+  } finally {
+    analyzeUpload.disabled = true;
+  }
+};

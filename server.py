@@ -548,6 +548,24 @@ def analyze(path, filename, preferred_steamid=None):
             item = by_player.setdefault(attacker, {"player": attacker, "kills": 0, "deaths": 0, "assists": 0, "headshots": 0, "damage": 0, "weapons": {}})
             item["flashes"] = item.get("flashes", 0) + 1
             item["flash_seconds"] = round(item.get("flash_seconds", 0) + float(blind.get("blind_duration") or blind.get("blind_time") or 0), 2)
+    smoke_expirations = {}
+    for expiration in smoke_expires:
+        entity = expiration.get("entityid")
+        if entity is not None:
+            smoke_expirations.setdefault(str(entity), []).append(expiration)
+    for smoke in smoke_detonates:
+        thrower = smoke.get("user_name") or smoke.get("thrower_name") or smoke.get("player_name")
+        if not thrower:
+            continue
+        item = by_player.setdefault(thrower, {"player": thrower, "kills": 0, "deaths": 0, "assists": 0, "headshots": 0, "damage": 0, "weapons": {}})
+        item["smokes"] = item.get("smokes", 0) + 1
+        try:
+            smoke_tick = int(smoke.get("tick") or 0)
+            expiration = next((event for event in smoke_expirations.get(str(smoke.get("entityid")), []) if int(event.get("tick") or 0) > smoke_tick), None)
+            duration_ticks = int(expiration.get("tick")) - smoke_tick if expiration else 18 * 64
+            item["smoke_seconds"] = round(item.get("smoke_seconds", 0) + max(duration_ticks, 0) / 64, 2)
+        except (TypeError, ValueError):
+            item["smoke_seconds"] = round(item.get("smoke_seconds", 0) + 18, 2)
     aggregate_fields = {"kills_total": "kills", "deaths_total": "deaths", "assists_total": "assists", "headshot_kills_total": "headshots", "damage_total": "damage", "utility_damage_total": "utility_damage", "enemies_flashed_total": "flashes"}
     for snapshot in snapshots:
         name = snapshot.get("player_name") or snapshot.get("name")
@@ -650,7 +668,8 @@ def analyze(path, filename, preferred_steamid=None):
         player["aim_rating"] = round(100 * (0.65 * accuracy_component + 0.35 * headshot_component), 1)
         utility_per_round = player.get("utility_damage", 0) / rounds_seen
         flashes_per_round = player.get("flashes", 0) / rounds_seen
-        player["utility_rating"] = round(min(100, 100 * (0.7 * min(utility_per_round / 20, 1) + 0.3 * min(flashes_per_round / 1.5, 1))), 1)
+        smoke_per_round = player.get("smoke_seconds", 0) / rounds_seen
+        player["utility_rating"] = round(min(100, 100 * (0.5 * min(utility_per_round / 20, 1) + 0.2 * min(flashes_per_round / 1.5, 1) + 0.3 * min(smoke_per_round / 12, 1))), 1)
         player["kast"] = round((player["kills"] + player["assists"] + (rounds_seen - player["deaths"])) / max(rounds_seen, 1) * 100, 1)
         player["opening_diff"] = player["opening_kills"] - player["opening_deaths"]
         player["trade_diff"] = player["trade_kills"] - player["trade_deaths"]
