@@ -150,9 +150,9 @@ const steamPoll = setInterval(async () => { if (await refreshSteamStatus()) clea
     matchesList.innerHTML = (items || []).map((match, index) => {
       const item = matchName(match, index, steamid);
       const added = matches.some(entry => entry[7] === item.id);
-      const action = item.replayUrl ? 'Download & analyze' : (added ? 'Added' : 'Add to Matches');
+      const action = added ? 'Analyzed' : (item.replayUrl ? 'Download & analyze' : 'Add to Matches');
       const mapIcon = item.hasMapIcon ? `<img class="gc-map-icon" src="assets/maps/${encodeURIComponent(item.map.toLowerCase())}.png" alt="" aria-hidden="true">` : '<img class="gc-map-icon gc-map-fallback" src="assets/map-badge-fallback.png" alt="" aria-hidden="true">';
-      return `<div class="sync-code gc-match-row">${mapIcon}<span class="gc-match-copy"><strong>${escapeHtml(item.mapLabel)}</strong><br><code>${escapeHtml([item.score, item.personal, item.rounds ? `${item.rounds} rounds` : '', item.duration, item.stamp].filter(Boolean).join(' · '))}</code></span><button class="button secondary" data-gc-index="${index}" ${!item.replayUrl && added ? 'disabled' : ''}>${action}</button></div>`;
+      return `<div class="sync-code gc-match-row">${mapIcon}<span class="gc-match-copy"><strong>${escapeHtml(item.mapLabel)}</strong><br><code>${escapeHtml([item.score, item.personal, item.rounds ? `${item.rounds} rounds` : '', item.duration, item.stamp].filter(Boolean).join(' · '))}</code></span><button class="button secondary" data-gc-index="${index}" ${added ? 'disabled' : ''}>${action}</button></div>`;
     }).join('');
     matchesList.querySelectorAll('[data-gc-index]').forEach(button => { button.onclick = async () => {
       const index = Number(button.dataset.gcIndex), item = matchName(items[index], index, steamid); activeDownloadButton = button;
