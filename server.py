@@ -4,7 +4,9 @@ import bz2
 import hashlib
 import json
 import math
+import multiprocessing
 import os
+import queue
 import shutil
 import subprocess
 import sys
@@ -46,6 +48,7 @@ STEAM_ERROR = None
 STEAM_CALLBACK = ""
 DOWNLOAD_JOBS = {}
 DOWNLOAD_JOBS_LOCK = threading.Lock()
+ANALYSIS_TIMEOUT_SECONDS = 180
 
 
 def load_state():
@@ -251,9 +254,12 @@ class SteamGameCoordinator:
             try:
                 env = os.environ.copy()
                 env["NODE_PATH"] = str(APP_ROOT / "node_modules")
+                creation_kwargs = {}
+                if sys.platform.startswith("win"):
+                    creation_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
                 self.process = subprocess.Popen(
                     [node, str(script)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                    text=True, bufsize=1, cwd=str(APP_ROOT), env=env,
+                    text=True, bufsize=1, cwd=str(APP_ROOT), env=env, **creation_kwargs,
                 )
             except OSError as exc:
                 self.state = "unavailable"
@@ -693,6 +699,43 @@ def analyze(path, filename, preferred_steamid=None):
     return clean({"file": filename, "metric_model": "event-impact-v2", "primary_player": primary_player, "primary_team": snapshot_teams.get(primary_player), "header": header, "rounds": rounds, "round_starts": round_starts, "round_freeze_ends": round_freeze_ends, "round_wins": round_wins, "round_losses": round_losses, "match_result": match_result, "positions": positions, "deaths": deaths, "blinds": blinds, "shots": shots, "bomb_plants": bomb_plants, "bomb_defuses": bomb_defuses, "bomb_drops": bomb_drops, "bomb_pickups": bomb_pickups, "smoke_detonates": smoke_detonates, "smoke_expires": smoke_expires, "inferno_starts": inferno_starts, "inferno_expires": inferno_expires, "flash_detonates": flash_detonates, "he_detonates": he_detonates, "decoys": decoys, "players": list(by_player.values()), "capabilities": ["kills", "deaths", "assists", "headshots", "opening duels", "trade kills", "KAST", "objectives", "weapon shots", "weapon hits", "damage", "utility damage", "flashes", "rounds", "player roster", "event positions"]})
 
 
+def _analysis_worker(path, filename, preferred_steamid, result_queue):
+    try:
+        result_queue.put((True, analyze(path, filename, preferred_steamid)))
+    except BaseException as exc:
+        result_queue.put((False, f"{type(exc).__name__}: {exc}"))
+
+
+def analyze_downloaded_demo(path, filename, preferred_steamid=None, timeout=ANALYSIS_TIMEOUT_SECONDS):
+    """Analyze a downloaded replay outside the server process.
+
+    demoparser2 is native code. Isolating it means a malformed replay cannot
+    freeze the webview/server forever, and lets Windows report a useful error
+    instead of polling a job that can never complete.
+    """
+    context = multiprocessing.get_context("spawn" if sys.platform.startswith("win") else "fork")
+    result_queue = context.Queue()
+    process = context.Process(target=_analysis_worker, args=(path, filename, preferred_steamid, result_queue), daemon=True)
+    process.start()
+    try:
+        try:
+            ok, value = result_queue.get(timeout=timeout)
+        except queue.Empty:
+            process.terminate()
+            process.join(timeout=5)
+            raise TimeoutError(f"Local demo analysis exceeded {timeout} seconds. The replay may be malformed or unsupported.")
+        process.join(timeout=5)
+        if not ok:
+            raise RuntimeError(value)
+        return value
+    finally:
+        if process.is_alive():
+            process.terminate()
+        process.join(timeout=5)
+        result_queue.close()
+        result_queue.join_thread()
+
+
 class Handler(SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(APP_ROOT), **kwargs)
@@ -902,7 +945,7 @@ class Handler(SimpleHTTPRequestHandler):
                 shutil.copyfileobj(source, output, length=1024 * 1024)
             if progress:
                 progress("Analyzing demo locally…")
-            result = analyze(str(destination), destination.name, STEAM_SESSION.get("steamid") if STEAM_SESSION else None)
+            result = analyze_downloaded_demo(str(destination), destination.name, STEAM_SESSION.get("steamid") if STEAM_SESSION else None)
             result["stored"] = True
             result["stored_file"] = destination.name
             result["match_id"] = str(match_id or "")
@@ -1110,6 +1153,7 @@ class Handler(SimpleHTTPRequestHandler):
 
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     STEAM_CALLBACK = f"http://127.0.0.1:{server.server_port}/auth/steam/callback"
     threading.Thread(target=server.serve_forever, daemon=True).start()

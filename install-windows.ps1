@@ -9,15 +9,17 @@ if ($python) { $pythonCommand = 'py'; $pythonArgs = @('-3') } else {
 }
 if (-not (Test-Path '.venv\Scripts\python.exe')) { Write-Host 'Creating Freetify environment...'; & $pythonCommand @pythonArgs -m venv .venv }
 $venvPython = Join-Path $appDir '.venv\Scripts\python.exe'
+$venvPythonw = Join-Path $appDir '.venv\Scripts\pythonw.exe'
 Write-Host 'Installing Freetify dependencies...'
 & $venvPython -m pip install --upgrade pip
 & $venvPython -m pip install -r requirements.txt
 $shortcutPath = Join-Path ([Environment]::GetFolderPath('Desktop')) 'Freetify.lnk'
 $shell = New-Object -ComObject WScript.Shell
 $shortcut = $shell.CreateShortcut($shortcutPath)
-$shortcut.TargetPath = Join-Path $appDir 'start-freetify.bat'
+$shortcut.TargetPath = $venvPythonw
+$shortcut.Arguments = '"' + (Join-Path $appDir 'server.py') + '"'
 $shortcut.WorkingDirectory = $appDir
 $shortcut.Description = 'Start Freetify CS2 demo analysis'
 $shortcut.Save()
 Write-Host "Freetify installed. Desktop shortcut created at: $shortcutPath" -ForegroundColor Green
-Start-Process -FilePath (Join-Path $appDir 'start-freetify.bat') -WorkingDirectory $appDir
+Start-Process -FilePath $venvPythonw -ArgumentList (Join-Path $appDir 'server.py') -WorkingDirectory $appDir -WindowStyle Hidden

@@ -5,4 +5,5 @@ if not exist ".venv\Scripts\python.exe" (
   pause
   exit /b 1
 )
-start "Freetify" "%~dp0.venv\Scripts\pythonw.exe" "%~dp0server.py"
+start "Freetify" /b "%~dp0.venv\Scripts\pythonw.exe" "%~dp0server.py"
+exit /b 0
